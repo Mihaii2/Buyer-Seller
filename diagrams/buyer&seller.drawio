@@ -1,0 +1,25 @@
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36" version="28.0.4">
+  <diagram id="iOSEcWPI304Ya3zf1ZQu" name="Page-1">
+    <mxGraphModel dx="730" dy="783" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="CX_8x8TOHre72PRCNNm8-1" value="file containing instructions on buying(price range, shares count, ticker, dollar risk amount). also has to set sell stop orders for the amount bought" style="whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="190" y="535" width="150" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="CX_8x8TOHre72PRCNNm8-2" value="file containing dollar amount to risk today" style="whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="430" y="540" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="CX_8x8TOHre72PRCNNm8-3" value="stock buyer(by row) - first deletes the row from the file containing trade instructions, then subtracts the dollar risk amount from the file containing the dollar amount to risk. at the end it will execute the trade(i will do the api buying later, right now only prints the buy execution." style="whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="300" y="130" width="180" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="CX_8x8TOHre72PRCNNm8-4" value="trade adder - appends to the file containing instructions the new trade it receives" style="whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="105" y="250" width="140" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="CX_8x8TOHre72PRCNNm8-7" value="trades viewer - just returns the trades available in the file containing trades instructions" style="whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="500" y="390" width="170" height="90" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
