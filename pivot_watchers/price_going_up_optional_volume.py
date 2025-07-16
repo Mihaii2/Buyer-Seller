@@ -116,27 +116,69 @@ class StockTradingBot:
         
         return statistics.mean(prices)
     
-    def calculate_volume_increase_in_timeframe(self, data: List[Dict], minutes: int) -> int:
-      """Calculate volume increase in the last X minutes"""
-      if not data:
-          return 0
-      
-      now = datetime.now()
-      cutoff_time = now - timedelta(minutes=minutes)
-      
-      # Get current volume (most recent data point)
-      current_volume = data[-1].get('volume', 0) if data else 0
-      
-      # Find volume at cutoff time
-      baseline_volume = 0
-      for record in data:
-          # Parse timestamp and find closest record to cutoff_time
-          # ... timestamp parsing logic ...
-          if record_time <= cutoff_time:
-              baseline_volume = record.get('volume', 0)
-              break  # Get the first (oldest) record before cutoff
-      
-      return current_volume - baseline_volume
+    def calculate_volume_increase_in_timeframe(self, data: List[Dict], minutes: int) -> Optional[int]:
+        """Calculate volume increase in the last X minutes"""
+        if minutes == -1:  # Entire day - calculate total volume for the day
+            total_volume = sum(record.get('volume', 0) for record in data if record.get('volume') is not None)
+            return total_volume if total_volume > 0 else None
+        
+        now = datetime.now()
+        cutoff_time = now - timedelta(minutes=minutes)
+        
+        # Sort data by timestamp to get chronological order
+        timestamped_data = []
+        for record in data:
+            try:
+                timestamp_str = record['timestamp']
+                
+                # Handle different timestamp formats
+                if timestamp_str.endswith('Z'):
+                    timestamp_str = timestamp_str[:-1]
+                elif '+' in timestamp_str:
+                    timestamp_str = timestamp_str.split('+')[0]
+                elif timestamp_str.endswith('+00:00'):
+                    timestamp_str = timestamp_str[:-6]
+                
+                # Parse the timestamp
+                try:
+                    record_time = datetime.fromisoformat(timestamp_str)
+                except ValueError:
+                    # Try alternative parsing if fromisoformat fails
+                    record_time = datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%S.%f')
+                
+                timestamped_data.append((record_time, record))
+                        
+            except (ValueError, KeyError) as e:
+                logger.debug(f"Failed to parse timestamp {record.get('timestamp', 'N/A')}: {e}")
+                continue
+        
+        # Sort by timestamp
+        timestamped_data.sort(key=lambda x: x[0])
+        
+        # Find the volume at the cutoff time (start of the timeframe)
+        volume_at_cutoff = None
+        current_volume = None
+        
+        for record_time, record in timestamped_data:
+            volume = record.get('volume')
+            if volume is not None:
+                if record_time <= cutoff_time:
+                    volume_at_cutoff = volume  # Keep updating until we pass the cutoff
+                elif record_time > cutoff_time:
+                    # This is within our timeframe, keep the latest volume
+                    current_volume = volume
+        
+        # If we don't have both volumes, we can't calculate the increase
+        if volume_at_cutoff is None or current_volume is None:
+            logger.info(f"Insufficient data to calculate volume increase for {minutes} minutes - "
+                       f"volume_at_cutoff: {volume_at_cutoff}, current_volume: {current_volume}")
+            return None
+        
+        # Calculate the increase
+        volume_increase = current_volume - volume_at_cutoff
+        logger.info(f"Volume increase in last {minutes} minutes: {volume_increase} "
+                   f"(from {volume_at_cutoff} to {current_volume})")
+        return max(0, volume_increase)  # Return 0 if volume decreased
     
     def check_volume_requirements(self, data: List[Dict], volume_requirements: List[Tuple[int, int]], 
                                  volume_multiplier: float = 1.0) -> bool:
@@ -145,12 +187,20 @@ class StockTradingBot:
             return True
         
         for minutes, required_volume in volume_requirements:
-            actual_volume = self.calculate_volume_in_timeframe(data, minutes)
+            actual_volume_increase = self.calculate_volume_increase_in_timeframe(data, minutes)
+            
+            # If we couldn't calculate volume increase, fail the check
+            if actual_volume_increase is None:
+                logger.info(f"Volume requirement failed: Could not calculate volume increase for {minutes} minutes")
+                return False
+            
             adjusted_required = int(required_volume * volume_multiplier)
             
-            if actual_volume < adjusted_required:
-                logger.info(f"Volume requirement not met: {actual_volume} < {adjusted_required} for {minutes} minutes")
+            if actual_volume_increase < adjusted_required:
+                logger.info(f"Volume requirement not met: {actual_volume_increase} < {adjusted_required} for {minutes} minutes")
                 return False
+            else:
+                logger.info(f"Volume requirement met: {actual_volume_increase} >= {adjusted_required} for {minutes} minutes")
         
         return True
     
@@ -300,7 +350,7 @@ class StockTradingBot:
                 elif pivot_position == "middle":
                     volume_multiplier = 0.5
                 else:  # upper
-                    volume_multiplier = 0.25
+                    volume_multiplier = 0
                 
                 logger.info(f"Current price {current_price} in {pivot_position} part of pivot, "
                            f"volume multiplier: {volume_multiplier}")
