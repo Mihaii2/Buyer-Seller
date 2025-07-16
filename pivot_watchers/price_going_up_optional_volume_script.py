@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-
+import pytz
+from datetime import datetime, timedelta, time as dt_time
 import requests
 import time
 import argparse
@@ -379,7 +380,9 @@ class StockTradingBot:
                    f"required_increase={required_increase_percent}%")
         logger.info(f"Day high max percent off: {day_high_max_percent_off}%")
         logger.info(f"Time-in-pivot requirement: {time_in_pivot_seconds}s for positions {time_in_pivot_positions}")
-        
+
+        wait_for_market_open()
+
         self.running = True
         
         while self.running:
@@ -502,6 +505,65 @@ def parse_pivot_positions(positions_str: str) -> List[str]:
             return []
     
     return positions
+  
+def is_market_open() -> bool:
+    """Check if the market is currently open (9:30 AM - 4:00 PM ET, Monday-Friday)"""
+    et = pytz.timezone('US/Eastern')
+    now = datetime.now(et)
+    
+    # Check if it's a weekday (Monday=0, Sunday=6)
+    if now.weekday() > 4:  # Saturday or Sunday
+        return False
+    
+    # Market hours: 9:30 AM - 4:00 PM ET
+    market_open = dt_time(9, 30)
+    market_close = dt_time(16, 0)
+    current_time = now.time()
+    
+    return market_open <= current_time <= market_close
+  
+def minutes_until_market_open() -> int:
+    """Calculate minutes until next market open"""
+    et = pytz.timezone('US/Eastern')
+    now = datetime.now(et)
+    
+    # If it's weekend, calculate time until Monday 9:30 AM
+    if now.weekday() > 4:  # Saturday or Sunday
+        days_until_monday = (7 - now.weekday()) % 7
+        if days_until_monday == 0:  # Sunday
+            days_until_monday = 1
+        next_open = now.replace(hour=9, minute=30, second=0, microsecond=0) + timedelta(days=days_until_monday)
+    else:
+        # It's a weekday
+        market_open_today = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        if now.time() < dt_time(9, 30):
+            # Before market open today
+            next_open = market_open_today
+        else:
+            # After market close today, next open is tomorrow (if it's a weekday)
+            if now.weekday() == 4:  # Friday
+                next_open = market_open_today + timedelta(days=3)  # Monday
+            else:
+                next_open = market_open_today + timedelta(days=1)  # Next day
+    
+    return int((next_open - now).total_seconds() / 60)
+
+def wait_for_market_open():
+    """Wait until market opens, printing countdown"""
+    while not is_market_open():
+        minutes = minutes_until_market_open()
+        hours = minutes // 60
+        mins = minutes % 60
+        
+        if hours > 0:
+            logger.info(f"Market closed. {hours}h {mins}m until market open. Checking again in 5 minutes...")
+            time.sleep(300)  # Sleep 5 minutes
+        else:
+            logger.info(f"Market closed. {mins}m until market open. Checking again in 1 minute...")
+            time.sleep(60)  # Sleep 1 minute
+    
+    logger.info("Market is now open!")
+
 
 def main():
     parser = argparse.ArgumentParser(description='Stock Trading Bot')
@@ -557,6 +619,11 @@ def main():
             time_in_pivot_seconds=args.time_in_pivot,
             time_in_pivot_positions=time_in_pivot_positions
         )
+        
+        # Wait for user to stop the bot
+        while bot.running:
+            time.sleep(1)
+            
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
