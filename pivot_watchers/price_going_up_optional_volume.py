@@ -20,6 +20,7 @@ class StockTradingBot:
         self.data_server_url = data_server_url
         self.trade_server_url = trade_server_url
         self.running = False
+        self.pivot_entry_time = None  # Track when price first entered pivot range
         
     def get_ticker_data(self, symbol: str) -> Optional[List[Dict]]:
         """Get historical data for a ticker from the data server"""
@@ -251,16 +252,16 @@ class StockTradingBot:
         
         return momentum_met
     
-    def check_day_high_condition(self, current_price: float, day_high: float) -> bool:
-        """Check if current price is at most 0.5% down from day's high"""
+    def check_day_high_condition(self, current_price: float, day_high: float, max_percent_off: float = 0.5) -> bool:
+        """Check if current price is at most max_percent_off% down from day's high"""
         if day_high is None or current_price is None:
             return False
         
-        max_drop = day_high * 0.05  # 0.5%
+        max_drop = day_high * (max_percent_off / 100.0)
         condition_met = current_price >= day_high - max_drop
         
         logger.info(f"Day high condition: current={current_price:.4f}, day_high={day_high:.4f}, "
-                   f"max_drop={max_drop:.4f}, met={condition_met}")
+                   f"max_drop={max_drop:.4f} ({max_percent_off}%), met={condition_met}")
         
         return condition_met
     
@@ -275,6 +276,69 @@ class StockTradingBot:
             return "middle"
         else:
             return "upper"
+    
+    def get_detailed_pivot_position(self, current_price: float, lower_price: float, higher_price: float) -> str:
+        """Get more detailed pivot position for time-in-pivot filtering"""
+        pivot_range = higher_price - lower_price
+        price_position = (current_price - lower_price) / pivot_range
+        
+        if price_position <= 0.25:
+            return "bottom"
+        elif price_position <= 0.5:
+            return "lower"
+        elif price_position <= 0.75:
+            return "middle"
+        else:
+            return "upper"
+    
+    def should_apply_time_in_pivot_requirement(self, pivot_position: str, time_in_pivot_positions: List[str]) -> bool:
+        """Check if time-in-pivot requirement should be applied for current position"""
+        if not time_in_pivot_positions or "all" in time_in_pivot_positions:
+            return True
+        
+        # Handle compound positions
+        if "upper_half" in time_in_pivot_positions and pivot_position in ["middle", "upper"]:
+            return True
+        if "middle_upper" in time_in_pivot_positions and pivot_position in ["middle", "upper"]:
+            return True
+        
+        return pivot_position in time_in_pivot_positions
+    
+    def check_time_in_pivot_requirement(self, current_price: float, lower_price: float, higher_price: float,
+                                       time_in_pivot_seconds: int, time_in_pivot_positions: List[str]) -> bool:
+        """Check if price has been in specified pivot positions for required time"""
+        if time_in_pivot_seconds <= 0:
+            return True  # No time requirement
+        
+        current_time = datetime.now()
+        
+        # Check if price is currently in pivot range
+        if current_price < lower_price or current_price > higher_price:
+            self.pivot_entry_time = None
+            logger.info(f"Price {current_price} not in pivot range, resetting timer")
+            return False
+        
+        # Get current pivot position
+        pivot_position = self.get_detailed_pivot_position(current_price, lower_price, higher_price)
+        
+        # Check if we need to apply time requirement for this position
+        if not self.should_apply_time_in_pivot_requirement(pivot_position, time_in_pivot_positions):
+            logger.info(f"Time-in-pivot requirement not applicable for position '{pivot_position}' - condition passed")
+            return True
+        
+        # If we don't have an entry time, set it now
+        if self.pivot_entry_time is None:
+            self.pivot_entry_time = current_time
+            logger.info(f"Price entered pivot range at position '{pivot_position}' at {current_time.strftime('%H:%M:%S')}")
+        
+        # Check if we've been in the pivot long enough
+        time_in_pivot = (current_time - self.pivot_entry_time).total_seconds()
+        condition_met = time_in_pivot >= time_in_pivot_seconds
+        
+        logger.info(f"Time-in-pivot check: position='{pivot_position}', time_in_pivot={time_in_pivot:.1f}s, "
+                   f"required={time_in_pivot_seconds}s, met={condition_met}")
+        
+        return condition_met
     
     def execute_trade(self, ticker: str, lower_price: float, higher_price: float) -> bool:
         """Execute the trade by sending POST request to trade server"""
@@ -300,15 +364,21 @@ class StockTradingBot:
     def monitor_and_trade(self, ticker: str, lower_price: float, higher_price: float,
                          volume_requirements: List[Tuple[int, int]], pivot_adjustment: float = 0.0,
                          recent_interval_seconds: int = 20, historical_interval_seconds: int = 600,
-                         required_increase_percent: float = 0.05):
+                         required_increase_percent: float = 0.05, day_high_max_percent_off: float = 0.5,
+                         time_in_pivot_seconds: int = 0, time_in_pivot_positions: List[str] = None):
         """Main monitoring and trading logic"""
         adjusted_higher_price = higher_price * (1 + pivot_adjustment)
+        
+        if time_in_pivot_positions is None:
+            time_in_pivot_positions = []
         
         logger.info(f"Starting monitoring for {ticker}")
         logger.info(f"Pivot range: {lower_price} - {adjusted_higher_price}")
         logger.info(f"Volume requirements: {volume_requirements}")
         logger.info(f"Momentum settings: recent={recent_interval_seconds}s, historical={historical_interval_seconds}s, "
                    f"required_increase={required_increase_percent}%")
+        logger.info(f"Day high max percent off: {day_high_max_percent_off}%")
+        logger.info(f"Time-in-pivot requirement: {time_in_pivot_seconds}s for positions {time_in_pivot_positions}")
         
         self.running = True
         
@@ -332,6 +402,7 @@ class StockTradingBot:
                 # Check if price is in pivot range
                 if current_price < lower_price or current_price > adjusted_higher_price:
                     logger.info(f"Price {current_price} not in pivot range [{lower_price}, {adjusted_higher_price}]")
+                    self.pivot_entry_time = None  # Reset timer when out of range
                     time.sleep(5)
                     continue
                 
@@ -359,7 +430,7 @@ class StockTradingBot:
                 conditions_met = True
                 
                 # 1. Check day high condition
-                if not self.check_day_high_condition(current_price, day_high):
+                if not self.check_day_high_condition(current_price, day_high, day_high_max_percent_off):
                     conditions_met = False
                 
                 # 2. Check price momentum
@@ -369,6 +440,11 @@ class StockTradingBot:
                 
                 # 3. Check volume requirements
                 if conditions_met and not self.check_volume_requirements(historical_data, volume_requirements, volume_multiplier):
+                    conditions_met = False
+                
+                # 4. Check time-in-pivot requirement
+                if conditions_met and not self.check_time_in_pivot_requirement(current_price, lower_price, adjusted_higher_price,
+                                                                             time_in_pivot_seconds, time_in_pivot_positions):
                     conditions_met = False
                 
                 if conditions_met:
@@ -411,6 +487,22 @@ def parse_volume_requirements(volume_args: List[str]) -> List[Tuple[int, int]]:
     
     return requirements
 
+def parse_pivot_positions(positions_str: str) -> List[str]:
+    """Parse pivot position string into list of positions"""
+    if not positions_str:
+        return []
+    
+    valid_positions = ["all", "bottom", "lower", "middle", "upper", "upper_half", "middle_upper"]
+    positions = [pos.strip().lower() for pos in positions_str.split(',')]
+    
+    # Validate positions
+    for pos in positions:
+        if pos not in valid_positions:
+            logger.error(f"Invalid pivot position: {pos}. Valid options: {', '.join(valid_positions)}")
+            return []
+    
+    return positions
+
 def main():
     parser = argparse.ArgumentParser(description='Stock Trading Bot')
     parser.add_argument('ticker', help='Stock ticker symbol')
@@ -426,6 +518,12 @@ def main():
                        help='Historical time interval in seconds for momentum check (default: 600 = 10 minutes)')
     parser.add_argument('--momentum-increase', type=float, default=0.05,
                        help='Required price increase percentage for momentum check (default: 0.05)')
+    parser.add_argument('--day-high-max-percent-off', type=float, default=0.5,
+                       help='Maximum percentage the current price can be below day high (default: 0.5)')
+    parser.add_argument('--time-in-pivot', type=int, default=0,
+                       help='Required time in seconds that price must be in pivot range (default: 0 = no requirement)')
+    parser.add_argument('--time-in-pivot-positions', type=str, default='',
+                       help='Comma-separated list of pivot positions where time requirement applies. Options: all, bottom, lower, middle, upper, upper_half, middle_upper (default: empty = no requirement)')
     parser.add_argument('--data-server', default='http://localhost:5001',
                        help='Data server URL')
     parser.add_argument('--trade-server', default='http://localhost:5002',
@@ -435,6 +533,9 @@ def main():
     
     # Parse volume requirements
     volume_requirements = parse_volume_requirements(args.volume)
+    
+    # Parse pivot positions
+    time_in_pivot_positions = parse_pivot_positions(args.time_in_pivot_positions)
     
     # Convert pivot adjustment to decimal
     pivot_adjustment = float(args.pivot_adjustment) / 100.0
@@ -451,7 +552,10 @@ def main():
             pivot_adjustment=pivot_adjustment,
             recent_interval_seconds=args.recent_interval,
             historical_interval_seconds=args.historical_interval,
-            required_increase_percent=args.momentum_increase
+            required_increase_percent=args.momentum_increase,
+            day_high_max_percent_off=args.day_high_max_percent_off,
+            time_in_pivot_seconds=args.time_in_pivot,
+            time_in_pivot_positions=time_in_pivot_positions
         )
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
