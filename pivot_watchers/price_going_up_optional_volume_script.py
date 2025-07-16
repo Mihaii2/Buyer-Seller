@@ -271,36 +271,19 @@ class StockTradingBot:
         pivot_range = higher_price - lower_price
         price_position = (current_price - lower_price) / pivot_range
         
-        if price_position <= 0.5:
+        if price_position <= 0.33:
             return "lower"
-        elif price_position <= 0.75:
-            return "middle"
-        else:
-            return "upper"
-    
-    def get_detailed_pivot_position(self, current_price: float, lower_price: float, higher_price: float) -> str:
-        """Get more detailed pivot position for time-in-pivot filtering"""
-        pivot_range = higher_price - lower_price
-        price_position = (current_price - lower_price) / pivot_range
-        
-        if price_position <= 0.25:
-            return "bottom"
-        elif price_position <= 0.5:
-            return "lower"
-        elif price_position <= 0.75:
+        elif price_position <= 0.67:
             return "middle"
         else:
             return "upper"
     
     def should_apply_time_in_pivot_requirement(self, pivot_position: str, time_in_pivot_positions: List[str]) -> bool:
         """Check if time-in-pivot requirement should be applied for current position"""
-        if not time_in_pivot_positions or "all" in time_in_pivot_positions:
-            return True
+        if not time_in_pivot_positions:
+            return False  # No requirement if no positions specified
         
-        # Handle compound positions
-        if "upper_half" in time_in_pivot_positions and pivot_position in ["middle", "upper"]:
-            return True
-        if "middle_upper" in time_in_pivot_positions and pivot_position in ["middle", "upper"]:
+        if "any" in time_in_pivot_positions:
             return True
         
         return pivot_position in time_in_pivot_positions
@@ -320,7 +303,7 @@ class StockTradingBot:
             return False
         
         # Get current pivot position
-        pivot_position = self.get_detailed_pivot_position(current_price, lower_price, higher_price)
+        pivot_position = self.get_pivot_position(current_price, lower_price, higher_price)
         
         # Check if we need to apply time requirement for this position
         if not self.should_apply_time_in_pivot_requirement(pivot_position, time_in_pivot_positions):
@@ -452,7 +435,7 @@ class StockTradingBot:
                 
                 if conditions_met:
                     logger.info(f"All conditions met for {ticker}! Executing trade...")
-                    if self.execute_trade(ticker, lower_price, adjusted_higher_price):
+                    if self.execute_trade(ticker, lower_price, higher_price):
                         logger.info(f"Trade executed successfully for {ticker}")
                         break
                     else:
@@ -495,7 +478,7 @@ def parse_pivot_positions(positions_str: str) -> List[str]:
     if not positions_str:
         return []
     
-    valid_positions = ["all", "bottom", "lower", "middle", "upper", "upper_half", "middle_upper"]
+    valid_positions = ["lower", "middle", "upper", "any"]
     positions = [pos.strip().lower() for pos in positions_str.split(',')]
     
     # Validate positions
@@ -585,7 +568,7 @@ def main():
     parser.add_argument('--time-in-pivot', type=int, default=0,
                        help='Required time in seconds that price must be in pivot range (default: 0 = no requirement)')
     parser.add_argument('--time-in-pivot-positions', type=str, default='',
-                       help='Comma-separated list of pivot positions where time requirement applies. Options: all, bottom, lower, middle, upper, upper_half, middle_upper (default: empty = no requirement)')
+                       help='Comma-separated list of pivot positions where time requirement applies. Options: lower, middle, upper, any (default: empty = no requirement)')
     parser.add_argument('--data-server', default='http://localhost:5001',
                        help='Data server URL')
     parser.add_argument('--trade-server', default='http://localhost:5002',
