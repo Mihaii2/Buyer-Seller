@@ -117,12 +117,35 @@ class StockTradingBot:
             return None
         
         return statistics.mean(prices)
+
+    def get_minutes_since_market_open(self) -> Optional[int]:
+        """Get the number of minutes since market opened today"""
+        et = pytz.timezone('US/Eastern')
+        now = datetime.now(et)
+        
+        # Check if market is currently open
+        if not is_market_open():
+            return None
+        
+        # Get today's market open time
+        market_open_today = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        
+        # Calculate minutes since market opened
+        minutes_since_open = (now - market_open_today).total_seconds() / 60
+        return int(minutes_since_open)
     
     def calculate_volume_increase_in_timeframe(self, data: List[Dict], minutes: int) -> Optional[int]:
         """Calculate volume increase in the last X minutes"""
         if minutes == -1:  # Entire day - calculate total volume for the day
             total_volume = sum(record.get('volume', 0) for record in data if record.get('volume') is not None)
             return total_volume if total_volume > 0 else None
+        
+        # Check if market has been open long enough for this timeframe
+        minutes_since_open = self.get_minutes_since_market_open()
+        if minutes_since_open is not None and minutes_since_open < minutes:
+            logger.info(f"Market has only been open for {minutes_since_open} minutes, "
+                    f"but check requires {minutes} minutes - automatically passing volume check")
+            return 999999999999  # Return a large number to pass the volume requirement
         
         now = datetime.now()
         cutoff_time = now - timedelta(minutes=minutes)
@@ -173,13 +196,13 @@ class StockTradingBot:
         # If we don't have both volumes, we can't calculate the increase
         if volume_at_cutoff is None or current_volume is None:
             logger.info(f"Insufficient data to calculate volume increase for {minutes} minutes - "
-                       f"volume_at_cutoff: {volume_at_cutoff}, current_volume: {current_volume}")
+                    f"volume_at_cutoff: {volume_at_cutoff}, current_volume: {current_volume}")
             return None
         
         # Calculate the increase
         volume_increase = current_volume - volume_at_cutoff
         logger.info(f"Volume increase in last {minutes} minutes: {volume_increase} "
-                   f"(from {volume_at_cutoff} to {current_volume})")
+                f"(from {volume_at_cutoff} to {current_volume})")
         return max(0, volume_increase)  # Return 0 if volume decreased
     
     def check_volume_requirements(self, data: List[Dict], volume_requirements: List[Tuple[int, int]], 
@@ -271,9 +294,9 @@ class StockTradingBot:
         pivot_range = higher_price - lower_price
         price_position = (current_price - lower_price) / pivot_range
         
-        if price_position <= 0.33:
+        if price_position <= 0.5:
             return "lower"
-        elif price_position <= 0.67:
+        elif price_position <= 0.75:
             return "middle"
         else:
             return "upper"
@@ -407,7 +430,7 @@ class StockTradingBot:
                 elif pivot_position == "middle":
                     volume_multiplier = 0.5
                 else:  # upper
-                    volume_multiplier = 0
+                    volume_multiplier = 0.125
                 
                 logger.info(f"Current price {current_price} in {pivot_position} part of pivot, "
                            f"volume multiplier: {volume_multiplier}")

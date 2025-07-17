@@ -2,10 +2,12 @@ import yfinance as yf
 import time
 import threading
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Flask, jsonify, request
 import json
 import logging
+import flask_cors
+import pytz
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -21,7 +23,66 @@ class StockDataServer:
         self.request_interval = 60 / self.max_requests_per_minute  # 2 seconds between requests
         self.running = False
         self.data_thread = None
+        self.market_check_interval = 60  # Check market status every minute
         
+    def is_market_open(self):
+        """Check if the US stock market is currently open"""
+        try:
+            # Get current time in Eastern Time (NYSE/NASDAQ timezone)
+            et = pytz.timezone('America/New_York')
+            now = datetime.now(et)
+            
+            # Market is closed on weekends
+            if now.weekday() >= 5:  # Saturday = 5, Sunday = 6
+                return False, self.get_time_until_next_open(now)
+            
+            # Regular market hours: 9:30 AM - 4:00 PM ET
+            market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+            market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+            
+            if market_open <= now <= market_close:
+                return True, None
+            else:
+                return False, self.get_time_until_next_open(now)
+                
+        except Exception as e:
+            logger.error(f"Error checking market status: {str(e)}")
+            return True, None  # Default to open if we can't check
+    
+    def get_time_until_next_open(self, current_time):
+        """Calculate time until next market open"""
+        et = pytz.timezone('America/New_York')
+        
+        # If it's before 9:30 AM today, next open is today at 9:30 AM
+        if current_time.hour < 9 or (current_time.hour == 9 and current_time.minute < 30):
+            next_open = current_time.replace(hour=9, minute=30, second=0, microsecond=0)
+        else:
+            # Market is closed for the day, next open is tomorrow at 9:30 AM
+            next_day = current_time.date().replace(day=current_time.day + 1)
+            next_open = et.localize(datetime.combine(next_day, datetime.min.time().replace(hour=9, minute=30)))
+            
+            # If tomorrow is Saturday, next open is Monday
+            while next_open.weekday() >= 5:
+                next_day = next_day.replace(day=next_day.day + 1)
+                next_open = et.localize(datetime.combine(next_day, datetime.min.time().replace(hour=9, minute=30)))
+        
+        time_diff = next_open - current_time
+        return time_diff
+    
+    def format_time_until_open(self, time_diff):
+        """Format time difference into readable string"""
+        if time_diff is None:
+            return "Market is open"
+        
+        total_seconds = int(time_diff.total_seconds())
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        
+        if hours > 0:
+            return f"{hours} hours and {minutes} minutes until market opens"
+        else:
+            return f"{minutes} minutes until market opens"
+    
     def add_ticker(self, symbol):
         """Add a ticker to the monitoring list"""
         symbol = symbol.upper()
@@ -58,16 +119,32 @@ class StockDataServer:
                 'volume': data.get('volume')
             }
             
-            # Add to ticker data (deque automatically handles max length)
-            self.ticker_data[symbol].append(record)
-            logger.info(f"Fetched data for {symbol}: ${record['currentPrice']} | volume {record['volume']} | time {record['timestamp']}")
-            
+            # Check for duplicates before adding
+            if not self.ticker_data[symbol] or (
+                self.ticker_data[symbol][-1]['currentPrice'] != record['currentPrice'] or 
+                self.ticker_data[symbol][-1]['volume'] != record['volume']
+            ):
+                self.ticker_data[symbol].append(record)
+                logger.info(f"Fetched data for {symbol}: ${record['currentPrice']} | volume {record['volume']} | time {record['timestamp']}")
+            else:
+                logger.info(f"Skipped duplicate data for {symbol}: ${record['currentPrice']} | volume {record['volume']}")  
+                
         except Exception as e:
             logger.error(f"Error fetching data for {symbol}: {str(e)}")
     
     def data_collection_loop(self):
         """Main loop for collecting data in round-robin fashion"""
         while self.running:
+            # Check if market is open
+            market_open, time_until_open = self.is_market_open()
+            
+            if not market_open:
+                time_msg = self.format_time_until_open(time_until_open)
+                logger.info(f"Market is closed. {time_msg}")
+                # Wait for market check interval before checking again
+                time.sleep(self.market_check_interval)
+                continue
+            
             if not self.tickers:
                 time.sleep(1)
                 continue
@@ -114,12 +191,21 @@ class StockDataServer:
         if symbol in self.ticker_data and self.ticker_data[symbol]:
             return self.ticker_data[symbol][-1]
         return None
+    
+    def get_market_status(self):
+        """Get current market status"""
+        market_open, time_until_open = self.is_market_open()
+        return {
+            'is_open': market_open,
+            'message': "Market is open" if market_open else self.format_time_until_open(time_until_open)
+        }
 
 # Initialize the server
 stock_server = StockDataServer()
 
 # Flask app for HTTP API
 app = Flask(__name__)
+flask_cors.CORS(app)  # Enable CORS for all routes
 
 @app.route('/tickers', methods=['GET'])
 def get_tickers():
@@ -172,11 +258,19 @@ def get_latest_data(symbol):
     else:
         return jsonify({'error': f'No data available for ticker {symbol}'}), 404
 
+@app.route('/market-status', methods=['GET'])
+def get_market_status():
+    """Get current market status"""
+    return jsonify(stock_server.get_market_status())
+
 @app.route('/status', methods=['GET'])
 def get_status():
     """Get server status"""
+    market_status = stock_server.get_market_status()
     return jsonify({
         'running': stock_server.running,
+        'market_open': market_status['is_open'],
+        'market_message': market_status['message'],
         'tickers_count': len(stock_server.tickers),
         'current_ticker_index': stock_server.current_ticker_index,
         'max_records_per_ticker': stock_server.max_records,
@@ -196,10 +290,6 @@ def stop_collection():
     return jsonify({'message': 'Data collection stopped'})
 
 if __name__ == '__main__':
-    # Add some example tickers to start with
-    stock_server.add_ticker('AS')
-    stock_server.add_ticker('PPIH')
-    stock_server.add_ticker('PLNT')
     
     # Start data collection
     stock_server.start()
