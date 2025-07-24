@@ -537,6 +537,7 @@ class StockTradingServer:
         
         if trade is None:
             error_msg = f"No trade found for {ticker} with price range ${lower_price} - ${higher_price}"
+            self._log_error("TRADE_NOT_FOUND", ticker, error_msg)
             print(f"❌ {error_msg}")
             return {'success': False, 'error': error_msg}
         
