@@ -242,7 +242,7 @@ class StockTradingServer:
             self.ib_wrapper = IBWrapper()
             self.ib_client = IBClient(self.ib_wrapper)
             
-            self.ib_client.connect("127.0.0.1", 7496, clientId=1)
+            self.ib_client.connect("127.0.0.1", 7497, clientId=1)
             
             # Start API thread
             api_thread = threading.Thread(target=self.ib_client.run)

@@ -74,6 +74,11 @@ class TradingBotManager:
         if params.get('time_in_pivot_positions'):
             cmd[2] += f" --time-in-pivot-positions {params['time_in_pivot_positions']}"
         
+        if params.get('volume_multipliers') and len(params['volume_multipliers']) == 3:
+            multipliers_str = ' '.join(str(m) for m in params['volume_multipliers'])
+            cmd[2] += f" --volume-multipliers {multipliers_str}"
+
+        
         if params.get('data_server'):
             cmd[2] += f" --data-server {params['data_server']}"
         

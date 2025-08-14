@@ -2,7 +2,7 @@ import yfinance as yf
 import time
 import threading
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from flask import Flask, jsonify, request
 import json
 import logging
@@ -17,13 +17,17 @@ class StockDataServer:
     def __init__(self):
         self.tickers = []
         self.ticker_data = {}  # {ticker: deque of records}
+        self.ticker_initial_prices = {}  # Store initial prices for each ticker
         self.current_ticker_index = 0
         self.max_records = 10000
         self.max_requests_per_minute = 120
-        self.request_interval = 60 / self.max_requests_per_minute  # 2 seconds between requests
+        self.request_interval = 60 / self.max_requests_per_minute  # 0.5 seconds between requests
         self.running = False
         self.data_thread = None
         self.market_check_interval = 60  # Check market status every minute
+        self.last_cleanup_date = None
+        self.market_just_opened = False
+        self.last_market_status = None
         
     def is_market_open(self):
         """Check if the US stock market is currently open"""
@@ -83,12 +87,69 @@ class StockDataServer:
         else:
             return f"{minutes} minutes until market opens"
     
+    def cleanup_old_records(self):
+        """Remove all records that are not from today"""
+        today = date.today()
+        
+        # Only run cleanup once per day
+        if self.last_cleanup_date == today:
+            return
+        
+        logger.info("Performing daily cleanup of old records...")
+        
+        for symbol in self.tickers:
+            if symbol in self.ticker_data:
+                original_count = len(self.ticker_data[symbol])
+                
+                # Filter to keep only today's records
+                today_records = deque(maxlen=self.max_records)
+                for record in self.ticker_data[symbol]:
+                    try:
+                        record_date = datetime.fromisoformat(record['timestamp']).date()
+                        if record_date == today:
+                            today_records.append(record)
+                    except (ValueError, KeyError):
+                        # Skip malformed records
+                        continue
+                
+                self.ticker_data[symbol] = today_records
+                removed_count = original_count - len(today_records)
+                
+                if removed_count > 0:
+                    logger.info(f"Cleaned up {removed_count} old records for {symbol}")
+        
+        self.last_cleanup_date = today
+    
+    def add_initial_market_open_record(self, symbol, current_price):
+        """Add an initial record with volume 0 when market opens"""
+        try:
+            # Create initial record with volume 0
+            initial_record = {
+                'symbol': symbol,
+                'timestamp': datetime.now().isoformat(),
+                'currentPrice': current_price,
+                'dayHigh': current_price,
+                'dayLow': current_price,
+                'volume': 0  # Set volume to 0 for market open record
+            }
+            
+            # Clear existing data and add the initial record
+            self.ticker_data[symbol].clear()
+            self.ticker_data[symbol].append(initial_record)
+            self.ticker_initial_prices[symbol] = current_price
+            
+            logger.info(f"Added market open record for {symbol}: ${current_price} with volume 0")
+            
+        except Exception as e:
+            logger.error(f"Error adding initial market open record for {symbol}: {str(e)}")
+    
     def add_ticker(self, symbol):
         """Add a ticker to the monitoring list"""
         symbol = symbol.upper()
         if symbol not in self.tickers:
             self.tickers.append(symbol)
             self.ticker_data[symbol] = deque(maxlen=self.max_records)
+            self.ticker_initial_prices[symbol] = None
             logger.info(f"Added ticker: {symbol}")
             return True
         return False
@@ -99,6 +160,8 @@ class StockDataServer:
         if symbol in self.tickers:
             self.tickers.remove(symbol)
             del self.ticker_data[symbol]
+            if symbol in self.ticker_initial_prices:
+                del self.ticker_initial_prices[symbol]
             logger.info(f"Removed ticker: {symbol}")
             return True
         return False
@@ -110,16 +173,26 @@ class StockDataServer:
             data = ticker.info
             
             # Extract required data
+            current_price = data.get('currentPrice')
+            if current_price is None:
+                logger.warning(f"No current price data for {symbol}")
+                return
+            
             record = {
                 'symbol': symbol,
                 'timestamp': datetime.now().isoformat(),
-                'currentPrice': data.get('currentPrice'),
+                'currentPrice': current_price,
                 'dayHigh': data.get('dayHigh'),
                 'dayLow': data.get('dayLow'),
                 'volume': data.get('volume')
             }
             
-            # Check for duplicates before adding
+            # If market just opened and we don't have an initial price, add initial record
+            if self.market_just_opened and self.ticker_initial_prices.get(symbol) is None:
+                self.add_initial_market_open_record(symbol, current_price)
+                return  # Don't add the regular record yet
+            
+            # Check for duplicates before adding (skip if same price and volume)
             if not self.ticker_data[symbol] or (
                 self.ticker_data[symbol][-1]['currentPrice'] != record['currentPrice'] or 
                 self.ticker_data[symbol][-1]['volume'] != record['volume']
@@ -127,7 +200,7 @@ class StockDataServer:
                 self.ticker_data[symbol].append(record)
                 logger.info(f"Fetched data for {symbol}: ${record['currentPrice']} | volume {record['volume']} | time {record['timestamp']}")
             else:
-                logger.info(f"Skipped duplicate data for {symbol}: ${record['currentPrice']} | volume {record['volume']}")  
+                logger.debug(f"Skipped duplicate data for {symbol}: ${record['currentPrice']} | volume {record['volume']}")  
                 
         except Exception as e:
             logger.error(f"Error fetching data for {symbol}: {str(e)}")
@@ -135,8 +208,23 @@ class StockDataServer:
     def data_collection_loop(self):
         """Main loop for collecting data in round-robin fashion"""
         while self.running:
+            # Perform daily cleanup
+            self.cleanup_old_records()
+            
             # Check if market is open
             market_open, time_until_open = self.is_market_open()
+            
+            # Check if market just opened
+            if market_open and self.last_market_status is False:
+                self.market_just_opened = True
+                logger.info("Market just opened! Will add initial records with volume 0.")
+                # Reset initial prices for all tickers
+                for symbol in self.tickers:
+                    self.ticker_initial_prices[symbol] = None
+            else:
+                self.market_just_opened = False
+            
+            self.last_market_status = market_open
             
             if not market_open:
                 time_msg = self.format_time_until_open(time_until_open)
@@ -159,7 +247,7 @@ class StockDataServer:
             # Move to next ticker
             self.current_ticker_index += 1
             
-            # Wait for the interval (2 seconds for 30 requests/minute)
+            # Wait for the interval
             time.sleep(self.request_interval)
     
     def start(self):
@@ -274,7 +362,8 @@ def get_status():
         'tickers_count': len(stock_server.tickers),
         'current_ticker_index': stock_server.current_ticker_index,
         'max_records_per_ticker': stock_server.max_records,
-        'request_interval_seconds': stock_server.request_interval
+        'request_interval_seconds': stock_server.request_interval,
+        'last_cleanup_date': str(stock_server.last_cleanup_date) if stock_server.last_cleanup_date else None
     })
 
 @app.route('/start', methods=['POST'])
@@ -288,6 +377,13 @@ def stop_collection():
     """Stop data collection"""
     stock_server.stop()
     return jsonify({'message': 'Data collection stopped'})
+
+@app.route('/cleanup', methods=['POST'])
+def manual_cleanup():
+    """Manually trigger cleanup of old records"""
+    stock_server.last_cleanup_date = None  # Force cleanup
+    stock_server.cleanup_old_records()
+    return jsonify({'message': 'Manual cleanup completed'})
 
 if __name__ == '__main__':
     

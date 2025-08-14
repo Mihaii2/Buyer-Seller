@@ -10,10 +10,24 @@ from collections import defaultdict
 import json
 from typing import List, Dict, Optional, Tuple
 import statistics
+import random
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Create unique log file name
+rand_id = random.randint(1000, 9999)
+log_filename = f"stock_data_server_{rand_id}.log"
+
+# File handler
+file_handler = logging.FileHandler(log_filename, mode='a', encoding='utf-8')
+file_handler.setLevel(logging.INFO)
+file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(file_formatter)
+logger.addHandler(file_handler)
+
+logger.info(f"Logging to file: {log_filename}")
 
 class StockTradingBot:
     def __init__(self, data_server_url: str = "http://localhost:5001", 
@@ -136,17 +150,20 @@ class StockTradingBot:
     
     def calculate_volume_increase_in_timeframe(self, data: List[Dict], minutes: int) -> Optional[int]:
         """Calculate volume increase in the last X minutes"""
+        logger.info(f"   Calculating volume increase for timeframe: {minutes} minutes")
+        
         if minutes == -1:  # Entire day - calculate total volume for the day
             total_volume = sum(record.get('volume', 0) for record in data if record.get('volume') is not None)
+            logger.info(f"   Total daily volume calculated: {total_volume}")
             return total_volume if total_volume > 0 else None
         
         # Check if market has been open long enough for this timeframe
         minutes_since_open = self.get_minutes_since_market_open()
         if minutes_since_open is not None and minutes_since_open < minutes:
-            logger.info(f"Market has only been open for {minutes_since_open} minutes, "
-                    f"but check requires {minutes} minutes - automatically passing volume check")
-            return 999999999999  # Return a large number to pass the volume requirement
-        
+            logger.info(f"   Market has only been open for {minutes_since_open} minutes, "
+                    f"adjusting timeframe from {minutes} to {minutes_since_open} minutes")
+            minutes = minutes_since_open  # Use actual time since market open
+
         now = datetime.now()
         cutoff_time = now - timedelta(minutes=minutes)
         
@@ -179,55 +196,89 @@ class StockTradingBot:
         
         # Sort by timestamp
         timestamped_data.sort(key=lambda x: x[0])
-        
+
+        logger.info(f"   First record and last in timeframe in format {timestamped_data[0][0].strftime('%H:%M:%S')} | Price: {timestamped_data[0][1].get('currentPrice')} | Volume: {timestamped_data[0][1].get('volume')}")
+        logger.info(f"   Last record in timeframe in format {timestamped_data[-1][0].strftime('%H:%M:%S')} | Price: {timestamped_data[-1][1].get('currentPrice')} | Volume: {timestamped_data[-1][1].get('volume')}")
+
         # Find the volume at the cutoff time (start of the timeframe)
         volume_at_cutoff = None
         current_volume = None
-        
+        first_available_volume = None
+
         for record_time, record in timestamped_data:
             volume = record.get('volume')
             if volume is not None:
+                # Keep track of the first available volume
+                if first_available_volume is None:
+                    first_available_volume = volume
+                
                 if record_time <= cutoff_time:
                     volume_at_cutoff = volume  # Keep updating until we pass the cutoff
                 elif record_time > cutoff_time:
                     # This is within our timeframe, keep the latest volume
                     current_volume = volume
-        
-        # If we don't have both volumes, we can't calculate the increase
+
+        # Use fallback logic if we don't have volume at cutoff
+        if volume_at_cutoff is None:
+            if first_available_volume is not None:
+                logger.info(f"No volume at cutoff time, using first available volume: {first_available_volume}")
+                volume_at_cutoff = first_available_volume
+            else:
+                logger.info("No volume data available at all")
+                return None
+
+        # If we still don't have current volume, use the latest available
+        if current_volume is None:
+            # Find the latest volume from all data
+            for record_time, record in reversed(timestamped_data):
+                volume = record.get('volume')
+                if volume is not None:
+                    current_volume = volume
+                    logger.info(f"Using latest available volume as current: {current_volume}")
+                    break
+
         if volume_at_cutoff is None or current_volume is None:
             logger.info(f"Insufficient data to calculate volume increase for {minutes} minutes - "
                     f"volume_at_cutoff: {volume_at_cutoff}, current_volume: {current_volume}")
             return None
         
         # Calculate the increase
+        logger.info(f"   Volume at cutoff ({cutoff_time.strftime('%H:%M:%S')}): {volume_at_cutoff}")
+        logger.info(f"   Current/latest volume: {current_volume}")
         volume_increase = current_volume - volume_at_cutoff
         logger.info(f"Volume increase in last {minutes} minutes: {volume_increase} "
                 f"(from {volume_at_cutoff} to {current_volume})")
         return max(0, volume_increase)  # Return 0 if volume decreased
     
     def check_volume_requirements(self, data: List[Dict], volume_requirements: List[Tuple[int, int]], 
-                                 volume_multiplier: float = 1.0) -> bool:
+                             volume_multiplier: float = 1.0) -> bool:
         """Check if volume requirements are met"""
         if not volume_requirements:
+            logger.info("   No volume requirements specified - PASSED")
             return True
         
-        for minutes, required_volume in volume_requirements:
+        logger.info(f"   Checking {len(volume_requirements)} volume requirement(s) with {volume_multiplier}x multiplier:")
+        
+        all_passed = True
+        for i, (minutes, required_volume) in enumerate(volume_requirements, 1):
             actual_volume_increase = self.calculate_volume_increase_in_timeframe(data, minutes)
+            logger.info(f"   Raw calculated increase for {minutes if minutes != -1 else 'day'}: {actual_volume_increase}")
             
             # If we couldn't calculate volume increase, fail the check
             if actual_volume_increase is None:
-                logger.info(f"Volume requirement failed: Could not calculate volume increase for {minutes} minutes")
-                return False
+                logger.info(f"   Requirement {i}: Could not calculate volume increase for {minutes} minutes - FAILED")
+                all_passed = False
+                continue
             
             adjusted_required = int(required_volume * volume_multiplier)
+            passed = actual_volume_increase >= adjusted_required
+            all_passed = all_passed and passed
             
-            if actual_volume_increase < adjusted_required:
-                logger.info(f"Volume requirement not met: {actual_volume_increase} < {adjusted_required} for {minutes} minutes")
-                return False
-            else:
-                logger.info(f"Volume requirement met: {actual_volume_increase} >= {adjusted_required} for {minutes} minutes")
+            timeframe_str = "entire day" if minutes == -1 else f"{minutes} minutes"
+            logger.info(f"   Requirement {i} ({timeframe_str}): {actual_volume_increase:,} >= {adjusted_required:,} - {'PASSED' if passed else 'FAILED'}")
         
-        return True
+        logger.info(f"   Overall volume requirements: {'PASSED' if all_passed else 'FAILED'}")
+        return all_passed
     
     def check_price_momentum(self, data: List[Dict], recent_interval_seconds: int = 20, 
                            historical_interval_seconds: int = 600, 
@@ -279,13 +330,22 @@ class StockTradingBot:
     def check_day_high_condition(self, current_price: float, day_high: float, max_percent_off: float = 0.5) -> bool:
         """Check if current price is at most max_percent_off% down from day's high"""
         if day_high is None or current_price is None:
+            logger.info(f"   Day high condition check failed - missing data: current_price={current_price}, day_high={day_high}")
             return False
         
         max_drop = day_high * (max_percent_off / 100.0)
-        condition_met = current_price >= day_high - max_drop
+        min_acceptable_price = day_high - max_drop
+        current_drop = day_high - current_price
+        current_drop_percent = (current_drop / day_high) * 100
         
-        logger.info(f"Day high condition: current={current_price:.4f}, day_high={day_high:.4f}, "
-                   f"max_drop={max_drop:.4f} ({max_percent_off}%), met={condition_met}")
+        condition_met = current_price >= min_acceptable_price
+        
+        logger.info(f"   Day high: {day_high:.4f}")
+        logger.info(f"   Current price: {current_price:.4f}")
+        logger.info(f"   Current drop: {current_drop:.4f} ({current_drop_percent:.2f}%)")
+        logger.info(f"   Max allowed drop: {max_drop:.4f} ({max_percent_off}%)")
+        logger.info(f"   Min acceptable price: {min_acceptable_price:.4f}")
+        logger.info(f"   Condition: {'PASSED' if condition_met else 'FAILED'}")
         
         return condition_met
     
@@ -366,13 +426,14 @@ class StockTradingBot:
                 return False
         except Exception as e:
             logger.error(f"Error executing trade: {str(e)}")
+            time.sleep(10)
             return False
     
     def monitor_and_trade(self, ticker: str, lower_price: float, higher_price: float,
                          volume_requirements: List[Tuple[int, int]], pivot_adjustment: float = 0.0,
                          recent_interval_seconds: int = 20, historical_interval_seconds: int = 600,
                          required_increase_percent: float = 0.05, day_high_max_percent_off: float = 0.5,
-                         time_in_pivot_seconds: int = 0, time_in_pivot_positions: List[str] = None):
+                         time_in_pivot_seconds: int = 0, time_in_pivot_positions: List[str] = None, volume_multipliers: List[float] = None):
         """Main monitoring and trading logic"""
         adjusted_higher_price = higher_price * (1 + pivot_adjustment)
         
@@ -391,8 +452,17 @@ class StockTradingBot:
 
         self.running = True
         
+        cycle_count = 0
+        start_time = datetime.now()
+        
         while self.running:
             try:
+                cycle_count += 1
+                cycle_start = datetime.now()
+                logger.info(f"\n{'='*60}")
+                logger.info(f"MONITORING CYCLE #{cycle_count} - {cycle_start.strftime('%H:%M:%S.%f')[:-3]}")
+                logger.info(f"{'='*60}")
+                
                 # Get current data
                 latest_data = self.get_latest_data(ticker)
                 if not latest_data:
@@ -408,12 +478,16 @@ class StockTradingBot:
                     time.sleep(5)
                     continue
                 
-                # Check if price is in pivot range
                 if current_price < lower_price or current_price > adjusted_higher_price:
-                    logger.info(f"Price {current_price} not in pivot range [{lower_price}, {adjusted_higher_price}]")
+                    if current_price < lower_price:
+                        logger.info(f"Price {current_price} is BELOW pivot range (min: {lower_price}, max: {adjusted_higher_price}) - difference: {lower_price - current_price:.4f}")
+                    else:
+                        logger.info(f"Price {current_price} is ABOVE pivot range (min: {lower_price}, max: {adjusted_higher_price}) - difference: {current_price - adjusted_higher_price:.4f}")
                     self.pivot_entry_time = None  # Reset timer when out of range
                     time.sleep(5)
                     continue
+
+                logger.info(f"✓ Price {current_price} is IN pivot range [{lower_price}, {adjusted_higher_price}]")
                 
                 # Get historical data for analysis
                 historical_data = self.get_ticker_data(ticker)
@@ -422,52 +496,97 @@ class StockTradingBot:
                     time.sleep(5)
                     continue
                 
-                # Determine pivot position and volume multiplier
+                ## Determine pivot position and volume multiplier
                 pivot_position = self.get_pivot_position(current_price, lower_price, adjusted_higher_price)
-                
+                pivot_range = adjusted_higher_price - lower_price
+                price_position_percent = ((current_price - lower_price) / pivot_range) * 100
+
+                if volume_multipliers is None:
+                    volume_multipliers = [1.0, 0.75, 0.5]
+
                 if pivot_position == "lower":
-                    volume_multiplier = 1.0
+                    volume_multiplier = volume_multipliers[0]
                 elif pivot_position == "middle":
-                    volume_multiplier = 0.5
-                else:  # upper
-                    volume_multiplier = 0.125
-                
-                logger.info(f"Current price {current_price} in {pivot_position} part of pivot, "
-                           f"volume multiplier: {volume_multiplier}")
+                    volume_multiplier = volume_multipliers[1]
+                else:
+                    volume_multiplier = volume_multipliers[2]
+
+
+                logger.info(f"📊 PIVOT ANALYSIS:")
+                logger.info(f"   Current price: {current_price}")
+                logger.info(f"   Pivot range: {lower_price} - {adjusted_higher_price} (span: {pivot_range:.4f})")
+                logger.info(f"   Position in range: {price_position_percent:.1f}% ({pivot_position} section)")
+                logger.info(f"   Volume multiplier: {volume_multiplier}x")
                 
                 # Check all conditions
                 conditions_met = True
-                
+                failed_conditions = []
+
+                logger.info("=== CHECKING ALL CONDITIONS ===")
+
                 # 1. Check day high condition
+                logger.info("1. Checking day high condition...")
                 if not self.check_day_high_condition(current_price, day_high, day_high_max_percent_off):
                     conditions_met = False
-                
+                    failed_conditions.append("day_high")
+                    logger.info("   ❌ Day high condition FAILED")
+                else:
+                    logger.info("   ✓ Day high condition PASSED")
+
                 # 2. Check price momentum
-                if conditions_met and not self.check_price_momentum(historical_data, recent_interval_seconds, 
-                                                                  historical_interval_seconds, required_increase_percent):
-                    conditions_met = False
-                
-                # 3. Check volume requirements
-                if conditions_met and not self.check_volume_requirements(historical_data, volume_requirements, volume_multiplier):
-                    conditions_met = False
-                
-                # 4. Check time-in-pivot requirement
-                if conditions_met and not self.check_time_in_pivot_requirement(current_price, lower_price, adjusted_higher_price,
-                                                                             time_in_pivot_seconds, time_in_pivot_positions):
-                    conditions_met = False
-                
                 if conditions_met:
-                    logger.info(f"All conditions met for {ticker}! Executing trade...")
+                    logger.info("2. Checking price momentum...")
+                    if not self.check_price_momentum(historical_data, recent_interval_seconds, 
+                                                historical_interval_seconds, required_increase_percent):
+                        conditions_met = False
+                        failed_conditions.append("momentum")
+                        logger.info("   ❌ Price momentum condition FAILED")
+                    else:
+                        logger.info("   ✓ Price momentum condition PASSED")
+                else:
+                    logger.info("2. Skipping price momentum check (previous condition failed)")
+
+                # 3. Check volume requirements
+                if conditions_met:
+                    logger.info("3. Checking volume requirements...")
+                    if not self.check_volume_requirements(historical_data, volume_requirements, volume_multiplier):
+                        conditions_met = False
+                        failed_conditions.append("volume")
+                        logger.info("   ❌ Volume requirements FAILED")
+                    else:
+                        logger.info("   ✓ Volume requirements PASSED")
+                else:
+                    logger.info("3. Skipping volume check (previous condition failed)")
+
+                # 4. Check time-in-pivot requirement
+                if conditions_met:
+                    logger.info("4. Checking time-in-pivot requirement...")
+                    if not self.check_time_in_pivot_requirement(current_price, lower_price, adjusted_higher_price,
+                                                            time_in_pivot_seconds, time_in_pivot_positions):
+                        conditions_met = False
+                        failed_conditions.append("time_in_pivot")
+                        logger.info("   ❌ Time-in-pivot requirement FAILED")
+                    else:
+                        logger.info("   ✓ Time-in-pivot requirement PASSED")
+                else:
+                    logger.info("4. Skipping time-in-pivot check (previous condition failed)")
+
+                # Summary of results
+                if conditions_met:
+                    logger.info("🎉 ALL CONDITIONS MET! Executing trade...")
                     if self.execute_trade(ticker, lower_price, higher_price):
-                        logger.info(f"Trade executed successfully for {ticker}")
+                        logger.info(f"✅ Trade executed successfully for {ticker}")
                         break
                     else:
-                        logger.error(f"Trade execution failed for {ticker}")
+                        logger.error(f"❌ Trade execution failed for {ticker}")
+                else:
+                    logger.info(f"❌ CONDITIONS NOT MET - Failed: {', '.join(failed_conditions)}")
                 
                 time.sleep(2)  # Check every 2 seconds
                 
             except KeyboardInterrupt:
                 logger.info("Stopping due to keyboard interrupt")
+                time.sleep(10)
                 break
             except Exception as e:
                 logger.error(f"Unexpected error: {str(e)}")
@@ -493,6 +612,7 @@ def parse_volume_requirements(volume_args: List[str]) -> List[Tuple[int, int]]:
                 logger.error(f"Invalid volume requirement format: {arg}")
         except ValueError:
             logger.error(f"Invalid volume requirement format: {arg}")
+            time.sleep(10)
     
     return requirements
 
@@ -578,8 +698,8 @@ def main():
     parser.add_argument('higher_price', type=float, help='Higher pivot price')
     parser.add_argument('--volume', action='append', default=[], 
                        help='Volume requirements in format "minutes=volume" or "day=volume". Can be specified multiple times.')
-    parser.add_argument('--pivot-adjustment', choices=['0.5', '1.0'], default='0.0',
-                       help='Increase upper pivot price by 0.5% or 1.0%')
+    parser.add_argument('--pivot-adjustment', choices=['0.0', '0.5', '1.0'], default='0.0',
+                       help='Increase upper pivot price by 0.0%, 0.5%, or 1.0%')
     parser.add_argument('--recent-interval', type=int, default=20,
                        help='Recent time interval in seconds for momentum check (default: 20)')
     parser.add_argument('--historical-interval', type=int, default=600,
@@ -596,6 +716,10 @@ def main():
                        help='Data server URL')
     parser.add_argument('--trade-server', default='http://localhost:5002',
                        help='Trade server URL')
+    parser.add_argument('--volume-multipliers', nargs=3, type=float, metavar=('LOWER', 'MIDDLE', 'UPPER'),
+                    default=[1.0, 0.75, 0.5],
+                    help='Volume multipliers for lower, middle, and upper pivot positions (default: 1.0 0.75 0.5)')
+
     
     args = parser.parse_args()
     
@@ -623,8 +747,10 @@ def main():
             required_increase_percent=args.momentum_increase,
             day_high_max_percent_off=args.day_high_max_percent_off,
             time_in_pivot_seconds=args.time_in_pivot,
-            time_in_pivot_positions=time_in_pivot_positions
+            time_in_pivot_positions=time_in_pivot_positions,
+            volume_multipliers=args.volume_multipliers
         )
+
         
         # Wait for user to stop the bot
         while bot.running:
@@ -634,6 +760,7 @@ def main():
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Bot failed with error: {str(e)}")
+        time.sleep(10)
 
 if __name__ == "__main__":
     main()
