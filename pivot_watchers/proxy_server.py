@@ -67,6 +67,9 @@ class TradingBotManager:
         
         if params.get('day_high_max_percent_off'):
             cmd[2] += f" --day-high-max-percent-off {params['day_high_max_percent_off']}"
+
+        if params.get('max_day_low'):
+            cmd[2] += f" --max-day-low {params['max_day_low']}"
         
         if params.get('time_in_pivot'):
             cmd[2] += f" --time-in-pivot {params['time_in_pivot']}"

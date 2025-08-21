@@ -217,7 +217,9 @@ class StockDataServer:
             # Check if market just opened
             if market_open and self.last_market_status is False:
                 self.market_just_opened = True
-                logger.info("Market just opened! Will add initial records with volume 0.")
+                logger.info("Market just opened! Waiting 15 seconds before starting data collection...")
+                time.sleep(15)  # Wait 15 seconds after market opens
+                logger.info("15-second delay complete. Will add initial records with volume 0.")
                 # Reset initial prices for all tickers
                 for symbol in self.tickers:
                     self.ticker_initial_prices[symbol] = None
@@ -227,11 +229,18 @@ class StockDataServer:
             self.last_market_status = market_open
             
             if not market_open:
-                time_msg = self.format_time_until_open(time_until_open)
-                logger.info(f"Market is closed. {time_msg}")
-                # Wait for market check interval before checking again
-                time.sleep(self.market_check_interval)
-                continue
+                if time_until_open:
+                    # Calculate exact wait time in seconds
+                    wait_seconds = int(time_until_open.total_seconds())
+                    logger.info(f"Market is closed. Waiting {wait_seconds} seconds until market opens...")
+                    
+                    # Wait until exactly market open time
+                    time.sleep(wait_seconds + 1)
+                    continue
+                else:
+                    # Fallback if we can't calculate time until open
+                    time.sleep(self.market_check_interval)
+                    continue
             
             if not self.tickers:
                 time.sleep(1)

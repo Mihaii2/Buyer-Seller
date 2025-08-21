@@ -349,6 +349,20 @@ class StockTradingBot:
         
         return condition_met
     
+    def check_day_low_condition(self, day_low: float, max_day_low: float) -> bool:
+        """Check if day's low is at most max_day_low"""
+        if day_low is None or max_day_low is None:
+            logger.info(f"   Day low condition check skipped - missing data: day_low={day_low}, max_day_low={max_day_low}")
+            return True  # Skip check if no limit set or no data
+        
+        condition_met = day_low <= max_day_low
+        
+        logger.info(f"   Day low: {day_low:.4f}")
+        logger.info(f"   Max allowed day low: {max_day_low:.4f}")
+        logger.info(f"   Condition: {'PASSED' if condition_met else 'FAILED'}")
+        
+        return condition_met
+    
     def get_pivot_position(self, current_price: float, lower_price: float, higher_price: float) -> str:
         """Determine which part of the pivot range the current price is in"""
         pivot_range = higher_price - lower_price
@@ -430,10 +444,11 @@ class StockTradingBot:
             return False
     
     def monitor_and_trade(self, ticker: str, lower_price: float, higher_price: float,
-                         volume_requirements: List[Tuple[int, int]], pivot_adjustment: float = 0.0,
-                         recent_interval_seconds: int = 20, historical_interval_seconds: int = 600,
-                         required_increase_percent: float = 0.05, day_high_max_percent_off: float = 0.5,
-                         time_in_pivot_seconds: int = 0, time_in_pivot_positions: List[str] = None, volume_multipliers: List[float] = None):
+                     volume_requirements: List[Tuple[int, int]], pivot_adjustment: float = 0.0,
+                     recent_interval_seconds: int = 20, historical_interval_seconds: int = 600,
+                     required_increase_percent: float = 0.05, day_high_max_percent_off: float = 0.5,
+                     time_in_pivot_seconds: int = 0, time_in_pivot_positions: List[str] = None, 
+                     volume_multipliers: List[float] = None, max_day_low: float = None):
         """Main monitoring and trading logic"""
         adjusted_higher_price = higher_price * (1 + pivot_adjustment)
         
@@ -447,7 +462,8 @@ class StockTradingBot:
                    f"required_increase={required_increase_percent}%")
         logger.info(f"Day high max percent off: {day_high_max_percent_off}%")
         logger.info(f"Time-in-pivot requirement: {time_in_pivot_seconds}s for positions {time_in_pivot_positions}")
-
+        logger.info(f"Max day low: {max_day_low}")
+        
         wait_for_market_open()
 
         self.running = True
@@ -472,6 +488,7 @@ class StockTradingBot:
                 
                 current_price = latest_data.get('currentPrice')
                 day_high = latest_data.get('dayHigh')
+                day_low = latest_data.get('dayLow')
                 
                 if current_price is None:
                     logger.warning(f"No current price available for {ticker}")
@@ -532,10 +549,22 @@ class StockTradingBot:
                     logger.info("   ❌ Day high condition FAILED")
                 else:
                     logger.info("   ✓ Day high condition PASSED")
-
-                # 2. Check price momentum
+                    
+                # 2. Check day low condition  
                 if conditions_met:
-                    logger.info("2. Checking price momentum...")
+                    logger.info("2. Checking day low condition...")
+                    if not self.check_day_low_condition(day_low, max_day_low):
+                        conditions_met = False
+                        failed_conditions.append("day_low")
+                        logger.info("   ❌ Day low condition FAILED")
+                    else:
+                        logger.info("   ✓ Day low condition PASSED")
+                else:
+                    logger.info("2. Skipping day low check (previous condition failed)")
+
+                # 3. Check price momentum
+                if conditions_met:
+                    logger.info("3. Checking price momentum...")
                     if not self.check_price_momentum(historical_data, recent_interval_seconds, 
                                                 historical_interval_seconds, required_increase_percent):
                         conditions_met = False
@@ -544,11 +573,11 @@ class StockTradingBot:
                     else:
                         logger.info("   ✓ Price momentum condition PASSED")
                 else:
-                    logger.info("2. Skipping price momentum check (previous condition failed)")
+                    logger.info("3. Skipping price momentum check (previous condition failed)")
 
-                # 3. Check volume requirements
+                # 4. Check volume requirements
                 if conditions_met:
-                    logger.info("3. Checking volume requirements...")
+                    logger.info("4. Checking volume requirements...")
                     if not self.check_volume_requirements(historical_data, volume_requirements, volume_multiplier):
                         conditions_met = False
                         failed_conditions.append("volume")
@@ -556,11 +585,11 @@ class StockTradingBot:
                     else:
                         logger.info("   ✓ Volume requirements PASSED")
                 else:
-                    logger.info("3. Skipping volume check (previous condition failed)")
+                    logger.info("4. Skipping volume check (previous condition failed)")
 
-                # 4. Check time-in-pivot requirement
+                # 5. Check time-in-pivot requirement
                 if conditions_met:
-                    logger.info("4. Checking time-in-pivot requirement...")
+                    logger.info("5. Checking time-in-pivot requirement...")
                     if not self.check_time_in_pivot_requirement(current_price, lower_price, adjusted_higher_price,
                                                             time_in_pivot_seconds, time_in_pivot_positions):
                         conditions_met = False
@@ -569,7 +598,7 @@ class StockTradingBot:
                     else:
                         logger.info("   ✓ Time-in-pivot requirement PASSED")
                 else:
-                    logger.info("4. Skipping time-in-pivot check (previous condition failed)")
+                    logger.info("5. Skipping time-in-pivot check (previous condition failed)")
 
                 # Summary of results
                 if conditions_met:
@@ -675,18 +704,41 @@ def minutes_until_market_open() -> int:
     return int((next_open - now).total_seconds() / 60)
 
 def wait_for_market_open():
-    """Wait until market opens, printing countdown"""
-    while not is_market_open():
-        minutes = minutes_until_market_open()
-        hours = minutes // 60
-        mins = minutes % 60
-        
-        if hours > 0:
-            logger.info(f"Market closed. {hours}h {mins}m until market open. Checking again in 5 minutes...")
-            time.sleep(300)  # Sleep 5 minutes
+    """Wait until market opens with precise timing"""
+    if is_market_open():
+        logger.info("Market is already open!")
+        return
+    
+    et = pytz.timezone('US/Eastern')
+    now = datetime.now(et)
+    
+    # Calculate next market open time
+    if now.weekday() > 4:  # Weekend
+        days_until_monday = (7 - now.weekday()) % 7
+        if days_until_monday == 0:  # Sunday
+            days_until_monday = 1
+        next_open = now.replace(hour=9, minute=30, second=0, microsecond=0) + timedelta(days=days_until_monday)
+    else:
+        # Weekday
+        market_open_today = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        if now.time() < dt_time(9, 30):
+            next_open = market_open_today
         else:
-            logger.info(f"Market closed. {mins}m until market open. Checking again in 1 minute...")
-            time.sleep(60)  # Sleep 1 minute
+            # After market close, next open is next business day
+            if now.weekday() == 4:  # Friday
+                next_open = market_open_today + timedelta(days=3)  # Monday
+            else:
+                next_open = market_open_today + timedelta(days=1)
+    
+    # Calculate wait time
+    wait_seconds = (next_open - now).total_seconds()
+    hours = int(wait_seconds // 3600)
+    minutes = int((wait_seconds % 3600) // 60)
+    
+    logger.info(f"Market closed. Waiting {hours}h {minutes}m until market open at {next_open.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    
+    # Sleep until market open (with 1 second buffer to ensure market is open)
+    time.sleep(wait_seconds + 1)
     
     logger.info("Market is now open!")
 
@@ -719,7 +771,8 @@ def main():
     parser.add_argument('--volume-multipliers', nargs=3, type=float, metavar=('LOWER', 'MIDDLE', 'UPPER'),
                     default=[1.0, 0.75, 0.5],
                     help='Volume multipliers for lower, middle, and upper pivot positions (default: 1.0 0.75 0.5)')
-
+    parser.add_argument('--max-day-low', type=float, default=None,
+                   help='Maximum day low price allowed (default: None = no limit)')
     
     args = parser.parse_args()
     
@@ -737,19 +790,20 @@ def main():
     
     try:
         bot.monitor_and_trade(
-            ticker=args.ticker.upper(),
-            lower_price=args.lower_price,
-            higher_price=args.higher_price,
-            volume_requirements=volume_requirements,
-            pivot_adjustment=pivot_adjustment,
-            recent_interval_seconds=args.recent_interval,
-            historical_interval_seconds=args.historical_interval,
-            required_increase_percent=args.momentum_increase,
-            day_high_max_percent_off=args.day_high_max_percent_off,
-            time_in_pivot_seconds=args.time_in_pivot,
-            time_in_pivot_positions=time_in_pivot_positions,
-            volume_multipliers=args.volume_multipliers
-        )
+        ticker=args.ticker.upper(),
+        lower_price=args.lower_price,
+        higher_price=args.higher_price,
+        volume_requirements=volume_requirements,
+        pivot_adjustment=pivot_adjustment,
+        recent_interval_seconds=args.recent_interval,
+        historical_interval_seconds=args.historical_interval,
+        required_increase_percent=args.momentum_increase,
+        day_high_max_percent_off=args.day_high_max_percent_off,
+        time_in_pivot_seconds=args.time_in_pivot,
+        time_in_pivot_positions=time_in_pivot_positions,
+        volume_multipliers=args.volume_multipliers,
+        max_day_low=args.max_day_low
+    )
 
         
         # Wait for user to stop the bot
