@@ -464,7 +464,7 @@ class StockTradingBot:
         logger.info(f"Time-in-pivot requirement: {time_in_pivot_seconds}s for positions {time_in_pivot_positions}")
         logger.info(f"Max day low: {max_day_low}")
         
-        # wait_for_market_open()
+        wait_for_market_open()
 
         self.running = True
         
@@ -480,125 +480,125 @@ class StockTradingBot:
                 logger.info(f"{'='*60}")
                 
                 # Get current data
-                # # # # latest_data = self.get_latest_data(ticker)
-                # # # # if not latest_data:
-                # # # #     logger.warning(f"No latest data available for {ticker}")
-                # # # #     time.sleep(5)
-                # # # #     continue
+                latest_data = self.get_latest_data(ticker)
+                if not latest_data:
+                    logger.warning(f"No latest data available for {ticker}")
+                    time.sleep(5)
+                    continue
                 
-                # # # current_price = latest_data.get('currentPrice')
-                # # # day_high = latest_data.get('dayHigh')
-                # # # day_low = latest_data.get('dayLow')
+                current_price = latest_data.get('currentPrice')
+                day_high = latest_data.get('dayHigh')
+                day_low = latest_data.get('dayLow')
                 
-                # # if current_price is None:
-                # #     logger.warning(f"No current price available for {ticker}")
-                # #     time.sleep(5)
-                # #     continue
+                if current_price is None:
+                    logger.warning(f"No current price available for {ticker}")
+                    time.sleep(5)
+                    continue
                 
-                # # if current_price < lower_price or current_price > adjusted_higher_price:
-                # #     if current_price < lower_price:
-                # #         logger.info(f"Price {current_price} is BELOW pivot range (min: {lower_price}, max: {adjusted_higher_price}) - difference: {lower_price - current_price:.4f}")
-                # #     else:
-                # #         logger.info(f"Price {current_price} is ABOVE pivot range (min: {lower_price}, max: {adjusted_higher_price}) - difference: {current_price - adjusted_higher_price:.4f}")
-                # #     self.pivot_entry_time = None  # Reset timer when out of range
-                # #     time.sleep(5)
-                # #     continue
+                if current_price < lower_price or current_price > adjusted_higher_price:
+                    if current_price < lower_price:
+                        logger.info(f"Price {current_price} is BELOW pivot range (min: {lower_price}, max: {adjusted_higher_price}) - difference: {lower_price - current_price:.4f}")
+                    else:
+                        logger.info(f"Price {current_price} is ABOVE pivot range (min: {lower_price}, max: {adjusted_higher_price}) - difference: {current_price - adjusted_higher_price:.4f}")
+                    self.pivot_entry_time = None  # Reset timer when out of range
+                    time.sleep(5)
+                    continue
 
-                # # logger.info(f"✓ Price {current_price} is IN pivot range [{lower_price}, {adjusted_higher_price}]")
+                logger.info(f"✓ Price {current_price} is IN pivot range [{lower_price}, {adjusted_higher_price}]")
                 
-                # # Get historical data for analysis
-                # historical_data = self.get_ticker_data(ticker)
-                # if not historical_data:
-                #     logger.warning(f"No historical data available for {ticker}")
-                #     time.sleep(5)
-                #     continue
+                # Get historical data for analysis
+                historical_data = self.get_ticker_data(ticker)
+                if not historical_data:
+                    logger.warning(f"No historical data available for {ticker}")
+                    time.sleep(5)
+                    continue
                 
-                # ## Determine pivot position and volume multiplier
-                # pivot_position = self.get_pivot_position(current_price, lower_price, adjusted_higher_price)
-                # pivot_range = adjusted_higher_price - lower_price
-                # price_position_percent = ((current_price - lower_price) / pivot_range) * 100
+                ## Determine pivot position and volume multiplier
+                pivot_position = self.get_pivot_position(current_price, lower_price, adjusted_higher_price)
+                pivot_range = adjusted_higher_price - lower_price
+                price_position_percent = ((current_price - lower_price) / pivot_range) * 100
 
-                # if volume_multipliers is None:
-                #     volume_multipliers = [1.0, 0.75, 0.5]
+                if volume_multipliers is None:
+                    volume_multipliers = [1.0, 0.75, 0.5]
 
-                # if pivot_position == "lower":
-                #     volume_multiplier = volume_multipliers[0]
-                # elif pivot_position == "middle":
-                #     volume_multiplier = volume_multipliers[1]
-                # else:
-                #     volume_multiplier = volume_multipliers[2]
+                if pivot_position == "lower":
+                    volume_multiplier = volume_multipliers[0]
+                elif pivot_position == "middle":
+                    volume_multiplier = volume_multipliers[1]
+                else:
+                    volume_multiplier = volume_multipliers[2]
 
 
-                # logger.info(f"📊 PIVOT ANALYSIS:")
-                # logger.info(f"   Current price: {current_price}")
-                # logger.info(f"   Pivot range: {lower_price} - {adjusted_higher_price} (span: {pivot_range:.4f})")
-                # logger.info(f"   Position in range: {price_position_percent:.1f}% ({pivot_position} section)")
-                # logger.info(f"   Volume multiplier: {volume_multiplier}x")
+                logger.info(f"📊 PIVOT ANALYSIS:")
+                logger.info(f"   Current price: {current_price}")
+                logger.info(f"   Pivot range: {lower_price} - {adjusted_higher_price} (span: {pivot_range:.4f})")
+                logger.info(f"   Position in range: {price_position_percent:.1f}% ({pivot_position} section)")
+                logger.info(f"   Volume multiplier: {volume_multiplier}x")
                 
-                # # Check all conditions
+                # Check all conditions
                 conditions_met = True
                 failed_conditions = []
 
                 logger.info("=== CHECKING ALL CONDITIONS ===")
 
-                # # 1. Check day high condition
-                # logger.info("1. Checking day high condition...")
-                # if not self.check_day_high_condition(current_price, day_high, day_high_max_percent_off):
-                #     conditions_met = False
-                #     failed_conditions.append("day_high")
-                #     logger.info("   ❌ Day high condition FAILED")
-                # else:
-                #     logger.info("   ✓ Day high condition PASSED")
+                # 1. Check day high condition
+                logger.info("1. Checking day high condition...")
+                if not self.check_day_high_condition(current_price, day_high, day_high_max_percent_off):
+                    conditions_met = False
+                    failed_conditions.append("day_high")
+                    logger.info("   ❌ Day high condition FAILED")
+                else:
+                    logger.info("   ✓ Day high condition PASSED")
                     
-                # # 2. Check day low condition  
-                # if conditions_met:
-                #     logger.info("2. Checking day low condition...")
-                #     if not self.check_day_low_condition(day_low, max_day_low):
-                #         conditions_met = False
-                #         failed_conditions.append("day_low")
-                #         logger.info("   ❌ Day low condition FAILED")
-                #     else:
-                #         logger.info("   ✓ Day low condition PASSED")
-                # else:
-                #     logger.info("2. Skipping day low check (previous condition failed)")
+                # 2. Check day low condition  
+                if conditions_met:
+                    logger.info("2. Checking day low condition...")
+                    if not self.check_day_low_condition(day_low, max_day_low):
+                        conditions_met = False
+                        failed_conditions.append("day_low")
+                        logger.info("   ❌ Day low condition FAILED")
+                    else:
+                        logger.info("   ✓ Day low condition PASSED")
+                else:
+                    logger.info("2. Skipping day low check (previous condition failed)")
 
-                # # 3. Check price momentum
-                # if conditions_met:
-                #     logger.info("3. Checking price momentum...")
-                #     if not self.check_price_momentum(historical_data, recent_interval_seconds, 
-                #                                 historical_interval_seconds, required_increase_percent):
-                #         conditions_met = False
-                #         failed_conditions.append("momentum")
-                #         logger.info("   ❌ Price momentum condition FAILED")
-                #     else:
-                #         logger.info("   ✓ Price momentum condition PASSED")
-                # else:
-                #     logger.info("3. Skipping price momentum check (previous condition failed)")
+                # 3. Check price momentum
+                if conditions_met:
+                    logger.info("3. Checking price momentum...")
+                    if not self.check_price_momentum(historical_data, recent_interval_seconds, 
+                                                historical_interval_seconds, required_increase_percent):
+                        conditions_met = False
+                        failed_conditions.append("momentum")
+                        logger.info("   ❌ Price momentum condition FAILED")
+                    else:
+                        logger.info("   ✓ Price momentum condition PASSED")
+                else:
+                    logger.info("3. Skipping price momentum check (previous condition failed)")
 
-                # # 4. Check volume requirements
-                # if conditions_met:
-                #     logger.info("4. Checking volume requirements...")
-                #     if not self.check_volume_requirements(historical_data, volume_requirements, volume_multiplier):
-                #         conditions_met = False
-                #         failed_conditions.append("volume")
-                #         logger.info("   ❌ Volume requirements FAILED")
-                #     else:
-                #         logger.info("   ✓ Volume requirements PASSED")
-                # else:
-                #     logger.info("4. Skipping volume check (previous condition failed)")
+                # 4. Check volume requirements
+                if conditions_met:
+                    logger.info("4. Checking volume requirements...")
+                    if not self.check_volume_requirements(historical_data, volume_requirements, volume_multiplier):
+                        conditions_met = False
+                        failed_conditions.append("volume")
+                        logger.info("   ❌ Volume requirements FAILED")
+                    else:
+                        logger.info("   ✓ Volume requirements PASSED")
+                else:
+                    logger.info("4. Skipping volume check (previous condition failed)")
 
-                # # 5. Check time-in-pivot requirement
-                # if conditions_met:
-                #     logger.info("5. Checking time-in-pivot requirement...")
-                #     if not self.check_time_in_pivot_requirement(current_price, lower_price, adjusted_higher_price,
-                #                                             time_in_pivot_seconds, time_in_pivot_positions):
-                #         conditions_met = False
-                #         failed_conditions.append("time_in_pivot")
-                #         logger.info("   ❌ Time-in-pivot requirement FAILED")
-                #     else:
-                #         logger.info("   ✓ Time-in-pivot requirement PASSED")
-                # else:
-                #     logger.info("5. Skipping time-in-pivot check (previous condition failed)")
+                # 5. Check time-in-pivot requirement
+                if conditions_met:
+                    logger.info("5. Checking time-in-pivot requirement...")
+                    if not self.check_time_in_pivot_requirement(current_price, lower_price, adjusted_higher_price,
+                                                            time_in_pivot_seconds, time_in_pivot_positions):
+                        conditions_met = False
+                        failed_conditions.append("time_in_pivot")
+                        logger.info("   ❌ Time-in-pivot requirement FAILED")
+                    else:
+                        logger.info("   ✓ Time-in-pivot requirement PASSED")
+                else:
+                    logger.info("5. Skipping time-in-pivot check (previous condition failed)")
 
                 # Summary of results
                 if conditions_met:
