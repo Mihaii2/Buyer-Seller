@@ -96,7 +96,7 @@ class IBWebAPI:
                 "orderType": order_data["orderType"],
                 "side": order_data["side"],
                 "quantity": order_data["quantity"],
-                "tif": "DAY"  # Time in force is usually required
+                "tif": order_data.get("tif", "DAY")  # Default to DAY if not provided
             }]
         }
         
@@ -154,6 +154,7 @@ class IBWebAPI:
                         print(f"📋 Using allocationId from order: {allocation_id}")
                 except Exception:
                     pass
+
             
             # Get account information to retrieve allocationId or account context
             accounts_response = self.session.get(f"{self.base_url}/iserver/accounts", timeout=10)
@@ -405,7 +406,7 @@ class StockTradingServer:
         self.ib_wrapper = None
         self.ib_client = None
         
-    def _execute_order(self, symbol: str, side: str, quantity: float, order_type: str = "MKT", price: float = None, stop_price: float = None) -> dict:
+    def _execute_order(self, symbol: str, side: str, quantity: float, order_type: str = "MKT", price: float = None, stop_price: float = None, tif: str = "DAY") -> dict:
         try:
             conid = self.ib_api.get_contract_id(symbol)
             if not conid:
@@ -427,6 +428,8 @@ class StockTradingServer:
                 order_data["auxPrice"] = stop_price
                 if order_type == "STP":  # For stop orders, set price equal to auxPrice
                     order_data["price"] = stop_price
+
+            order_data["tif"] = tif
 
             response = self.ib_api.place_order(conid, order_data)
             print(f"   📤 Order request sent. Status: {response.status_code}")
@@ -781,7 +784,8 @@ class StockTradingServer:
                         "SELL", 
                         scaled_shares,
                         "STP", 
-                        stop_price=adjusted_stop_price
+                        stop_price=adjusted_stop_price,
+                        tif="GTC"
                     )
                     
                     if result['success']:
