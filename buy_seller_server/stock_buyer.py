@@ -88,7 +88,7 @@ class IBWebAPI:
             print(f"   ❌ No selected account found")
             return accounts_response
         
-        url = f"{self.base_url}/iserver/account/DUA617953/orders"
+        url = f"{self.base_url}/iserver/account/{account_id}/orders"
         payload = {
             "orders": [{
                 "acctId": account_id,
@@ -139,9 +139,61 @@ class IBWebAPI:
         return self.session.get(url, timeout=30)
     
     def cancel_order(self, order_id):
-        """Cancel an order"""
-        url = f"{self.base_url}/iserver/account/orders/{order_id}"
-        return self.session.delete(url, timeout=30)
+        """Cancel an order with proper account context"""
+        try:
+            # Optionally include allocationId if present in order details
+            order_status = self.get_order_status(order_id)
+            if order_status.status_code == 200:
+                try:
+                    order_data = order_status.json()
+                    if isinstance(order_data, list) and order_data:
+                        order_data = order_data[0]
+                    allocation_id = order_data.get("allocationId")
+                    if allocation_id:
+                        payload['allocationId'] = allocation_id
+                        print(f"📋 Using allocationId from order: {allocation_id}")
+                except Exception:
+                    pass
+            
+            # Get account information to retrieve allocationId or account context
+            accounts_response = self.session.get(f"{self.base_url}/iserver/accounts", timeout=10)
+            if accounts_response.status_code != 200:
+                print(f"❌ Failed to get accounts for cancellation: {accounts_response.status_code}, {accounts_response.text}")
+                return accounts_response
+
+            accounts_data = accounts_response.json()
+            account_id = accounts_data.get('selectedAccount')
+            if not account_id:
+                print(f"❌ No selected account found for cancellation")
+                return accounts_response
+
+            # Construct the cancellation URL
+            url = f"{self.base_url}/iserver/account/{account_id}/order/{order_id}"
+
+            
+            # Optionally include allocationId if required
+            payload = {}
+            if 'allocationProfile' in accounts_data:
+                allocation_id = accounts_data.get('allocationProfile', {}).get('id')
+                if allocation_id:
+                    payload['allocationId'] = allocation_id
+                    print(f"📋 Using allocationId: {allocation_id}")
+
+            print(f"📤 Sending cancel request to: {url}")
+            print(f"📋 Cancel payload: {json.dumps(payload, indent=2)}")
+            
+            response = self.session.delete(url, json=payload, timeout=30)
+            print(f"📥 Cancel response status: {response.status_code}, Body: {response.text}")
+            
+            if response.status_code in [200, 201]:
+                return response
+            else:
+                print(f"❌ Cancel failed: {response.status_code}, {response.text}")
+                return response
+
+        except Exception as e:
+            print(f"❌ Cancel order error: {str(e)}")
+            return {'status_code': 500, 'text': str(e)}
 
 class StockTradingServer:
     def __init__(self):
@@ -442,11 +494,12 @@ class StockTradingServer:
             print(f"   ❌ {error_msg}")
             return {'success': False, 'error': error_msg}
 
-    def _wait_for_order_fill_webapi(self, order_id: str, expected_shares: float, timeout: int = 120) -> dict:
+    def _wait_for_order_fill_webapi(self, order_id: str, expected_shares: float, timeout: int = 7) -> dict:
+        """Wait for an order to fill, handling partial fills and cancellation with proper account context."""
         print(f"   ⏳ Waiting for order {order_id} to fill {expected_shares} shares...")
         
         start_time = time.time()
-        last_filled = 0
+        last_filled = 0.0
         no_progress_time = 0
         max_retries = 3
         
@@ -460,79 +513,26 @@ class StockTradingServer:
                     response = self.ib_api.get_order_status(order_id)
                     print(f"   📋 Specific order status response (attempt {attempt + 1}): {response.text}")
                     
+                    order_info = None
                     if response.status_code == 200 and response.json():
                         order_info = response.json()
                         if isinstance(order_info, list):
                             order_info = order_info[0] if order_info else None
-                    else:
-                        # Fall back to full order list
+                    
+                    # Fall back to full order list if specific status fails
+                    if not order_info:
                         response = self.ib_api.get_order_status()
                         print(f"   📋 Full order status response (attempt {attempt + 1}): {response.text}")
                         if response.status_code == 200:
                             orders = response.json().get('orders', [])
-                            order_info = None
                             for order in orders:
                                 if str(order.get('orderId')) == str(order_id) or str(order.get('id')) == str(order_id):
                                     order_info = order
                                     break
-                        else:
-                            print(f"   ⚠️ Failed to get order status: {response.status_code}, Response: {response.text}")
-                            if attempt < max_retries - 1:
-                                time.sleep(1)
-                                continue
-                            break
                     
-                    if order_info:
-                        status = order_info.get('status', order_info.get('orderStatus', 'Unknown')).upper()
-                        filled_qty = float(order_info.get('filledQuantity', order_info.get('filled', 0)))
-                        remaining_qty = float(order_info.get('remainingQuantity', order_info.get('remaining', expected_shares - filled_qty)))
-                        avg_price = float(order_info.get('avgPrice', order_info.get('avgFillPrice', 0)))
-                        
-                        if filled_qty > last_filled:
-                            last_filled = filled_qty
-                            no_progress_time = 0
-                            print(f"   📈 Progress: {filled_qty}/{expected_shares} shares filled at avg ${avg_price}")
-                        
-                        if status in ['FILLED', 'COMPLETE']:
-                            print(f"   ✅ Order {order_id} FULLY FILLED: {filled_qty} shares at ${avg_price}")
-                            return {
-                                'success': True,
-                                'filled_shares': filled_qty,
-                                'remaining_shares': 0,
-                                'avg_price': avg_price,
-                                'status': status,
-                                'cancelled': False
-                            }
-                        elif status in ['CANCELLED', 'CANCELED']:
-                            print(f"   ❌ Order {order_id} CANCELLED: {filled_qty} shares filled, {remaining_qty} remaining")
-                            return {
-                                'success': filled_qty > 0,
-                                'filled_shares': filled_qty,
-                                'remaining_shares': remaining_qty,
-                                'avg_price': avg_price,
-                                'status': status,
-                                'cancelled': True
-                            }
-                        elif status in ['PRESUBMITTED']:
-                            print(f"   ⏳ Order {order_id} in PreSubmitted state, waiting for status change...")
-                            time.sleep(3)
-                            continue
-                        elif filled_qty > 0 and filled_qty < expected_shares:
-                            if status in ['PARTIALLYFILLED', 'SUBMITTED', 'PENDING']:
-                                no_progress_time += 1
-                                if no_progress_time >= 5:
-                                    print(f"   ⚠️ No progress for 5s on partial fill. Considering cancellation...")
-                                    break
-                                print(f"   ⏳ Partial fill: {filled_qty}/{expected_shares} shares. Waiting for more...")
-                                time.sleep(1)
-                                continue
-                    else:
+                    # Check trades endpoint as a fallback
+                    if not order_info:
                         print(f"   ⚠️ Order {order_id} not found in order list (attempt {attempt + 1})")
-                        if attempt < max_retries - 1:
-                            time.sleep(1)
-                            continue
-                        
-                        # Check trades endpoint
                         print(f"   ⚠️ Checking trades for order {order_id}...")
                         trades_response = self.ib_api.session.get(f"{self.ib_api.base_url}/iserver/account/trades", timeout=30)
                         if trades_response.status_code == 200:
@@ -548,7 +548,53 @@ class StockTradingServer:
                                         'status': 'FILLED',
                                         'cancelled': False
                                     }
-                        print(f"   ⚠️ Order {order_id} not found in order or trade list")
+                        print(f"   ⚠️ Order {order_id} not found in trades")
+                        if attempt < max_retries - 1:
+                            time.sleep(1)
+                            continue
+                        break
+                    
+                    # Process order information
+                    status = order_info.get('status', order_info.get('orderStatus', 'Unknown')).upper()
+                    filled_qty = float(order_info.get('filledQuantity', order_info.get('filled', 0)))
+                    remaining_qty = float(order_info.get('remainingQuantity', order_info.get('remaining', expected_shares - filled_qty)))
+                    avg_price = float(order_info.get('avgPrice', order_info.get('avgFillPrice', 0)))
+                    
+                    if filled_qty > last_filled:
+                        last_filled = filled_qty
+                        no_progress_time = 0
+                        print(f"   📈 Progress: {filled_qty}/{expected_shares} shares filled at avg ${avg_price}")
+                    
+                    if status in ['FILLED', 'COMPLETE']:
+                        print(f"   ✅ Order {order_id} FULLY FILLED: {filled_qty} shares at ${avg_price}")
+                        return {
+                            'success': True,
+                            'filled_shares': filled_qty,
+                            'remaining_shares': 0,
+                            'avg_price': avg_price,
+                            'status': status,
+                            'cancelled': False
+                        }
+                    elif status in ['CANCELLED', 'CANCELED']:
+                        print(f"   ❌ Order {order_id} CANCELLED: {filled_qty} shares filled, {remaining_qty} remaining")
+                        return {
+                            'success': filled_qty > 0,
+                            'filled_shares': filled_qty,
+                            'remaining_shares': remaining_qty,
+                            'avg_price': avg_price,
+                            'status': status,
+                            'cancelled': True
+                        }
+                    elif status in ['PRESUBMITTED']:
+                        print(f"   ⏳ Order {order_id} in PreSubmitted state, waiting for status change...")
+                        time.sleep(3)
+                        continue
+                    elif filled_qty > 0 and filled_qty < expected_shares:
+                        if status in ['PARTIALLYFILLED', 'SUBMITTED', 'PENDING']:
+                            no_progress_time += 1
+                            print(f"   ⏳ Partial fill: {filled_qty}/{expected_shares} shares. Waiting for more...")
+                            time.sleep(1)
+                            continue
                     
                     time.sleep(1)
                     no_progress_time += 1
@@ -562,44 +608,72 @@ class StockTradingServer:
                     no_progress_time += 1
                     break
         
-        # Cancellation logic
-        print(f"   ⏰ Order {order_id} timeout. Checking status before cancellation...")
+        # Timeout reached - final check
+        print(f"   ⏰ Order {order_id} timeout. Checking final status...")
+        final_filled = 0.0
+        final_remaining = expected_shares
+        final_avg = 0.0
+        final_status = "Timeout"
+        cancelled = False
         try:
-            status_response = self.ib_api.get_order_status(order_id)
-            print(f"   📋 Order status before cancellation: {status_response.text}")
-            if status_response.status_code == 200 and status_response.json():
-                cancel_response = self.ib_api.cancel_order(order_id)
-                print(f"   📤 Cancellation request sent for order {order_id}: {cancel_response.status_code}, Response: {cancel_response.text}")
-                if cancel_response.status_code == 200:
-                    time.sleep(5)  # Wait for cancellation to process
-                    final_response = self.ib_api.get_order_status()
-                    if final_response.status_code == 200:
-                        orders = final_response.json().get('orders', [])
-                        for order in orders:
-                            if str(order.get('orderId')) == str(order_id) or str(order.get('id')) == str(order_id):
-                                filled_qty = float(order.get('filledQuantity', order.get('filled', 0)))
-                                remaining_qty = float(order.get('remainingQuantity', order.get('remaining', expected_shares - filled_qty)))
-                                avg_price = float(order.get('avgPrice', order.get('avgFillPrice', 0)))
-                                return {
-                                    'success': filled_qty > 0,
-                                    'filled_shares': filled_qty,
-                                    'remaining_shares': remaining_qty,
-                                    'avg_price': avg_price,
-                                    'status': 'Cancelled',
-                                    'cancelled': True
-                                }
-            else:
-                print(f"   ⚠️ Order {order_id} not found, skipping cancellation")
+            response = self.ib_api.get_order_status()  # Full order list
+            if response.status_code == 200:
+                orders = response.json().get('orders', [])
+                order_info = next((o for o in orders if str(o.get('orderId')) == str(order_id)), None)
+                if order_info:
+                    final_filled = float(order_info.get('filledQuantity', 0))
+                    final_remaining = float(order_info.get('remainingQuantity', expected_shares - final_filled))
+                    final_avg = float(order_info.get('avgPrice', 0))
+                    final_status = order_info.get('status')
+                    print(f"   📋 Final status: {final_status}, Filled: {final_filled}, Remaining: {final_remaining}")
+                    if final_remaining > 0:
+                        print(f"   📤 Cancelling remaining {final_remaining} shares...")
+                        cancel_response = self.ib_api.cancel_order(order_id)
+                        if isinstance(cancel_response, dict):
+                            # Handle error case from cancel_order
+                            if cancel_response.get('status_code') in [200, 201]:
+                                cancelled = True
+                                final_remaining = 0.0
+                                print("   ✅ Cancelled remaining")
+                            else:
+                                print(f"   ❌ Cancel failed: {cancel_response.get('text', 'Unknown error')}")
+                        else:
+                            # Handle standard response object
+                            if cancel_response.status_code in [200, 201]:
+                                cancelled = True
+                                final_remaining = 0.0
+                                print("   ✅ Cancelled remaining")
+                            else:
+                                print(f"   ❌ Cancel failed: {cancel_response.status_code}, {cancel_response.text}")
+            if final_filled == 0:  # Fallback to trades if no filled found
+                print(f"   ⚠️ Checking trades for final status of order {order_id}...")
+                trades_response = self.ib_api.session.get(f"{self.ib_api.base_url}/iserver/account/trades", timeout=30)
+                if trades_response.status_code == 200:
+                    trades = trades_response.json()
+                    exec_qty_total = 0.0
+                    price_total = 0.0
+                    for trade in trades:
+                        if str(trade.get('order_id')) == str(order_id):
+                            exec_qty = float(trade.get('executed_qty', 0))
+                            exec_qty_total += exec_qty
+                            price_total += float(trade.get('avg_price', 0)) * exec_qty
+                    if exec_qty_total > 0:
+                        final_filled = exec_qty_total
+                        final_avg = price_total / exec_qty_total
+                        final_remaining = 0.0
+                        final_status = "Filled"
+                        print(f"   📋 Found filled from trades: {final_filled} shares")
         except Exception as e:
-            print(f"   ❌ Failed to cancel order {order_id}: {str(e)}")
+            print(f"   ❌ Error in final check: {str(e)}")
+            self._log_error("FINAL_STATUS_CHECK_FAILED", "UNKNOWN", str(e), order_id=order_id)
         
         return {
-            'success': False,
-            'filled_shares': 0,
-            'remaining_shares': expected_shares,
-            'avg_price': 0,
-            'status': 'Timeout',
-            'cancelled': False
+            'success': final_filled > 0,
+            'filled_shares': final_filled,
+            'remaining_shares': final_remaining,
+            'avg_price': final_avg,
+            'status': final_status,
+            'cancelled': cancelled
         }
     
     def _execute_buy_order(self, trade: Trade) -> dict:
@@ -627,22 +701,18 @@ class StockTradingServer:
             print(f"   📤 BUY ORDER SUBMITTED (Order ID: {order_id})")
             
             # Wait for order to fill with partial handling
-            fill_result = self._wait_for_order_fill_webapi(order_id, trade.shares, timeout=5)
+            fill_result = self._wait_for_order_fill_webapi(order_id, trade.shares, timeout=7)
             
-            if fill_result['success']:
-                filled_shares = float(fill_result['filled_shares'])
-                avg_price = float(fill_result['avg_price'])
-                
-                if filled_shares == trade.shares:
-                    print(f"   ✅ BUY ORDER FULLY COMPLETED: {filled_shares} shares at ${avg_price}")
-                else:
-                    print(f"   ⚠️ BUY ORDER PARTIALLY COMPLETED: {filled_shares}/{trade.shares} shares at ${avg_price}")
-                
+            if fill_result['filled_shares'] > 0:
+                filled_shares = fill_result['filled_shares']
+                avg_price = fill_result['avg_price']
+                full_fill = filled_shares == trade.shares
+                print(f"   ✅ BUY ORDER {'FULLY ' if full_fill else 'PARTIALLY '}COMPLETED: {filled_shares} shares at ${avg_price}")
                 return {
                     'success': True,
                     'filled_shares': filled_shares,
                     'avg_price': avg_price,
-                    'full_fill': filled_shares == trade.shares
+                    'full_fill': full_fill
                 }
             else:
                 error_msg = f"Buy order {order_id} failed to fill any shares"
