@@ -5,14 +5,13 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from flask import Flask, request, jsonify
-from ibapi.client import EClient
-from ibapi.wrapper import EWrapper
-from ibapi.contract import Contract
-from ibapi.order import Order
 import math
 from queue import Queue
 import uuid
 import flask_cors
+import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 @dataclass
@@ -34,42 +33,115 @@ class Trade:
         if self.trade_id is None:
             self.trade_id = str(uuid.uuid4())
 
-class IBWrapper(EWrapper):
-    def __init__(self):
-        EWrapper.__init__(self)
-        self.next_order_id = None
-        self.order_id_event = threading.Event()
-        self.order_fills = {}
-        self.order_events = {}
+class IBWebAPI:
+    def __init__(self, base_url="https://localhost:5050/v1/api"):
+        self.base_url = base_url
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session.timeout = 30
+
+    def get_contract_details(self, conid):
+        """Get contract details for a given conid"""
+        try:
+            url = f"{self.base_url}/iserver/secdef/info?conid={conid}"
+            response = self.session.get(url, timeout=30)
+            if response.status_code == 200:
+                return response.json()
+            print(f"❌ Failed to get contract details for conid {conid}: {response.status_code}, {response.text}")
+            return None
+        except Exception as e:
+            print(f"❌ Contract details error: {str(e)}")
+            return None
         
-    def nextValidId(self, orderId: int):
-        self.next_order_id = orderId
-        self.order_id_event.set()
+    def is_connected(self):
+        try:
+            response = self.session.get(f"{self.base_url}/iserver/auth/status", timeout=10)
+            return response.status_code == 200 and response.json().get('authenticated', False)
+        except:
+            return False
         
-    def orderStatus(self, orderId, status, filled, remaining, avgFillPrice, permId, parentId, lastFillPrice, clientId, whyHeld, mktCapPrice):
-        print(f"Order {orderId}: Status={status}, Filled={filled}, Remaining={remaining}, AvgPrice={avgFillPrice}")
+    def get_accounts(self):
+        """Get account information"""
+        try:
+            response = self.session.get(f"{self.base_url}/iserver/accounts", timeout=10)
+            print(f"   📊 Accounts response: {response.status_code}")
+            if response.status_code == 200:
+                print(f"   📊 Accounts: {response.json()}")
+            else:
+                print(f"   📊 Accounts error: {response.text}")
+            return response
+        except Exception as e:
+            print(f"   ❌ Get accounts error: {str(e)}")
+            return None
+    
+    def place_order(self, conid, order_data):
+        """Place order via Web API"""
+        # First get the account ID
+        accounts_response = self.session.get(f"{self.base_url}/iserver/accounts", timeout=10)
+        if accounts_response.status_code != 200:
+            print(f"   ❌ Failed to get accounts: {accounts_response.status_code}")
+            return accounts_response
         
-        self.order_fills[orderId] = {
-            'status': status,
-            'filled': float(filled),
-            'remaining': float(remaining),
-            'avgFillPrice': float(avgFillPrice)
+        accounts_data = accounts_response.json()
+        account_id = accounts_data.get('selectedAccount')
+        if not account_id:
+            print(f"   ❌ No selected account found")
+            return accounts_response
+        
+        url = f"{self.base_url}/iserver/account/U15571793/orders"
+        payload = {
+            "orders": [{
+                "acctId": account_id,
+                "conid": int(conid),  # Ensure it's an integer
+                "orderType": order_data["orderType"],
+                "side": order_data["side"],
+                "quantity": order_data["quantity"],
+                "tif": "DAY"  # Time in force is usually required
+            }]
         }
         
-        if status in ['Filled', 'Cancelled']:
-            if orderId in self.order_events:
-                self.order_events[orderId].set()
+        # Only add price fields if they exist
+        if order_data.get("price") is not None:
+            payload["orders"][0]["price"] = order_data["price"]
+        if order_data.get("auxPrice") is not None:
+            payload["orders"][0]["auxPrice"] = order_data["auxPrice"]
         
-    def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
-        print(f"Error {reqId}: {errorCode} - {errorString}")
+        print(f"   📤 Sending order to: {url}")
+        print(f"   📋 Payload: {json.dumps(payload, indent=2)}")
         
-        if reqId in self.order_events:
-            self.order_events[reqId].set()
-
-class IBClient(EClient):
-    def __init__(self, wrapper):
-        EClient.__init__(self, wrapper)
-        self.wrapper = wrapper
+        try:
+            response = self.session.post(url, json=payload, timeout=30)
+            print(f"   📥 Response status: {response.status_code}")
+            if response.status_code != 200:
+                print(f"   📥 Response headers: {dict(response.headers)}")
+                print(f"   📥 Response text: {response.text}")
+            return response
+        except Exception as e:
+            print(f"   ❌ Request exception: {str(e)}")
+            raise
+    
+    def get_contract_id(self, symbol):
+        """Get contract ID for a symbol"""
+        url = f"{self.base_url}/iserver/secdef/search"
+        payload = {"symbol": symbol}
+        response = self.session.post(url, json=payload, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            if data and len(data) > 0:
+                return data[0].get("conid")
+        return None
+    
+    def get_order_status(self, order_id=None):
+        """Get order status"""
+        url = f"{self.base_url}/iserver/account/orders"
+        if order_id:
+            url += f"/{order_id}"
+        return self.session.get(url, timeout=30)
+    
+    def cancel_order(self, order_id):
+        """Cancel an order"""
+        url = f"{self.base_url}/iserver/account/orders/{order_id}"
+        return self.session.delete(url, timeout=30)
 
 class StockTradingServer:
     def __init__(self):
@@ -78,8 +150,8 @@ class StockTradingServer:
         self.available_risk: float = 0.0
         self.error_log: List[Dict] = []
         
-        self.server_start_time = time.time()  # Track when server started
-        self.last_trade_time = None  # Track last trade execution
+        self.server_start_time = time.time()
+        self.last_trade_time = None
         
         # Threading for sequential processing
         self.request_queue = Queue()
@@ -87,11 +159,8 @@ class StockTradingServer:
         self.is_processing = False
         self.server_running = True
         
-        # IBKR connection
-        self.ib_wrapper = None
-        self.ib_client = None
-        
-        
+        # IBKR Web API connection
+        self.ib_api = None
         
         # Start processing thread
         self.start_processing_thread()
@@ -237,189 +306,328 @@ class StockTradingServer:
         print(f"🚨 Error logged: {error_type} - {error_message}")
     
     def _connect_to_ib(self, ticker: str = "UNKNOWN") -> bool:
-        """Connect to IB TWS"""
+        """Connect to IB Web API"""
         try:
-            self.ib_wrapper = IBWrapper()
-            self.ib_client = IBClient(self.ib_wrapper)
+            self.ib_api = IBWebAPI()
             
-            self.ib_client.connect("127.0.0.1", 7497, clientId=1)
-            
-            # Start API thread
-            api_thread = threading.Thread(target=self.ib_client.run)
-            api_thread.daemon = True
-            api_thread.start()
-            
-            # Wait for connection
-            if not self.ib_wrapper.order_id_event.wait(timeout=5):
-                error_msg = "Failed to receive next valid order ID from IB within 10 seconds"
-                self._log_error("CONNECTION_TIMEOUT", ticker, error_msg)
+            # Test connection
+            if not self.ib_api.is_connected():
+                error_msg = "Not authenticated with IBKR Web API. Please authenticate first."
+                self._log_error("CONNECTION_FAILED", ticker, error_msg)
+                print(f"❌ {error_msg}")
                 return False
-                
-            print("✅ Connected to IB TWS")
+            
+            # Test basic functionality
+            test_response = self.ib_api.session.get(f"{self.ib_api.base_url}/iserver/accounts")
+            if test_response.status_code != 200:
+                error_msg = f"IBKR Web API test failed: {test_response.status_code}"
+                self._log_error("CONNECTION_TEST_FAILED", ticker, error_msg)
+                print(f"❌ {error_msg}")
+                return False
+            
+            # Test account access and contract lookup
+            print("✅ Testing account access...")
+            self.ib_api.get_accounts()
+
+            print(f"✅ Testing contract lookup for {ticker}...")
+            test_conid = self.ib_api.get_contract_id(ticker)
+            if test_conid:
+                print(f"✅ Found contract ID for {ticker}: {test_conid}")
+            else:
+                print(f"⚠️ Could not find contract ID for {ticker}")
+                    
+            print("✅ Connected to IBKR Web API")
             return True
             
         except Exception as e:
-            error_msg = f"Failed to connect to IB: {str(e)}"
+            error_msg = f"Failed to connect to IBKR Web API: {str(e)}"
             print(f"❌ {error_msg}")
             self._log_error("CONNECTION_FAILED", ticker, error_msg)
             return False
     
     def _disconnect_from_ib(self):
-        """Disconnect from IB TWS"""
-        if self.ib_client and self.ib_client.isConnected():
-            self.ib_client.disconnect()
-            print("✅ Disconnected from IB TWS")
+        """Disconnect from IBKR Web API"""
+        self.ib_api = None
+        print("✅ Disconnected from IBKR Web API")
         
         self.ib_wrapper = None
         self.ib_client = None
-    
-    def _wait_for_order_fill(self, order_id: int, expected_shares: float, timeout: int = 60) -> dict:
-        """Wait for order to be filled with cancellation support"""
-        self.ib_wrapper.order_events[order_id] = threading.Event()
         
+    def _execute_order(self, symbol: str, side: str, quantity: float, order_type: str = "MKT", price: float = None, stop_price: float = None) -> dict:
+        try:
+            conid = self.ib_api.get_contract_id(symbol)
+            if not conid:
+                return {'success': False, 'error': f'Could not find contract for {symbol}'}
+
+            # Validate quantity
+            if quantity < 0.1:
+                print(f"   ⚠️ Warning: Order quantity {quantity} is very small and may not be supported for {symbol}")
+                return {'success': False, 'error': f'Quantity {quantity} too small for {symbol}'}
+
+            order_data = {
+                "orderType": order_type,
+                "side": side.upper(),
+                "quantity": quantity
+            }
+            if price:
+                order_data["price"] = price
+            if stop_price:
+                order_data["auxPrice"] = stop_price
+                if order_type == "STP":  # For stop orders, set price equal to auxPrice
+                    order_data["price"] = stop_price
+
+            response = self.ib_api.place_order(conid, order_data)
+            print(f"   📤 Order request sent. Status: {response.status_code}")
+            print(f"   📋 Order data: {order_data}")
+            print(f"   📋 Contract ID: {conid}")
+            print(f"   📥 Response headers: {dict(response.headers)}")
+            print(f"   📥 Response body: {response.text}")
+
+            if response.status_code != 200:
+                error_details = f'Status: {response.status_code}, Response: {response.text}'
+                print(f"   ❌ Order failed - {error_details}")
+                return {'success': False, 'error': error_details}
+
+            result = response.json()
+            print(f"   ✅ Order response: {result}")
+
+            # Handle multiple confirmations
+            max_confirmations = 3
+            confirmation_count = 0
+            current_result = result
+
+            while isinstance(current_result, list) and len(current_result) > 0 and 'id' in current_result[0] and confirmation_count < max_confirmations:
+                confirmation_id = current_result[0]['id']
+                print(f"   📩 Confirmation required. Sending reply to ID: {confirmation_id}")
+                reply_response = self.ib_api.session.post(
+                    f"{self.ib_api.base_url}/iserver/reply/{confirmation_id}",
+                    json={"confirmed": True},
+                    timeout=30
+                )
+                print(f"   📥 Reply response status: {reply_response.status_code}, Headers: {dict(reply_response.headers)}, Body: {reply_response.text}")
+                if reply_response.status_code != 200:
+                    return {
+                        'success': False,
+                        'error': f'Confirmation failed: Status {reply_response.status_code}, Response: {reply_response.text}'
+                    }
+                current_result = reply_response.json()
+                print(f"   ✅ Confirmation response: {current_result}")
+                confirmation_count += 1
+
+            # Extract order_id from final response
+            order_id = None
+            if isinstance(current_result, list) and current_result:
+                order_id = current_result[0].get('order_id') or current_result[0].get('id')
+            elif isinstance(current_result, dict):
+                order_id = current_result.get('order_id') or current_result.get('id')
+
+            if order_id:
+                print(f"   📤 BUY ORDER SUBMITTED (Order ID: {order_id})")
+                # Immediate status check
+                time.sleep(1)  # Short delay to allow order registration
+                status_response = self.ib_api.get_order_status(order_id)
+                print(f"   📋 Immediate order status check: {status_response.text}")
+                return {
+                    'success': True,
+                    'order_id': order_id,
+                    'message': 'Order confirmed and placed'
+                }
+            else:
+                error_msg = f'Confirmation succeeded but no order_id returned: {current_result}'
+                print(f"   ❌ BUY ORDER SUBMISSION FAILED: {error_msg}")
+                return {'success': False, 'error': error_msg}
+
+        except Exception as e:
+            error_msg = f"Order execution failed: {str(e)}"
+            print(f"   ❌ {error_msg}")
+            return {'success': False, 'error': error_msg}
+
+    def _wait_for_order_fill_webapi(self, order_id: str, expected_shares: float, timeout: int = 120) -> dict:
         print(f"   ⏳ Waiting for order {order_id} to fill {expected_shares} shares...")
         
         start_time = time.time()
         last_filled = 0
         no_progress_time = 0
+        max_retries = 3
+        
+        # Initial delay to allow order registration
+        time.sleep(2)
         
         while time.time() - start_time < timeout:
-            if self.ib_wrapper.order_events[order_id].wait(timeout=5):
-                order_status = self.ib_wrapper.order_fills.get(order_id, {})
-                status = order_status.get('status', 'Unknown')
-                filled_qty = float(order_status.get('filled', 0))
-                remaining_qty = float(order_status.get('remaining', expected_shares))
-                avg_price = float(order_status.get('avgFillPrice', 0))
-                
-                if filled_qty > last_filled:
-                    last_filled = filled_qty
-                    no_progress_time = 0
-                    print(f"   📈 Progress: {filled_qty}/{expected_shares} shares filled at avg ${avg_price}")
-                
-                if status == 'Filled':
-                    print(f"   ✅ Order {order_id} FULLY FILLED: {filled_qty} shares at ${avg_price}")
-                    return {
-                        'success': True,
-                        'filled_shares': filled_qty,
-                        'remaining_shares': 0,
-                        'avg_price': avg_price,
-                        'status': status,
-                        'cancelled': False
-                    }
-                
-                elif status == 'Cancelled':
-                    print(f"   ❌ Order {order_id} CANCELLED: {filled_qty} shares filled, {remaining_qty} remaining")
-                    return {
-                        'success': filled_qty > 0,
-                        'filled_shares': filled_qty,
-                        'remaining_shares': remaining_qty,
-                        'avg_price': avg_price,
-                        'status': status,
-                        'cancelled': True
-                    }
-                
-                elif filled_qty > 0 and filled_qty < expected_shares:
-                    if status in ['PartiallyFilled', 'Submitted']:
-                        no_progress_time += 5
-                        
-                        if no_progress_time >= 30:
-                            print(f"   ⚠️ No progress for 30s on partial fill. Considering cancellation...")
+            for attempt in range(max_retries):
+                try:
+                    # Try specific order status first
+                    response = self.ib_api.get_order_status(order_id)
+                    print(f"   📋 Specific order status response (attempt {attempt + 1}): {response.text}")
+                    
+                    if response.status_code == 200 and response.json():
+                        order_info = response.json()
+                        if isinstance(order_info, list):
+                            order_info = order_info[0] if order_info else None
+                    else:
+                        # Fall back to full order list
+                        response = self.ib_api.get_order_status()
+                        print(f"   📋 Full order status response (attempt {attempt + 1}): {response.text}")
+                        if response.status_code == 200:
+                            orders = response.json().get('orders', [])
+                            order_info = None
+                            for order in orders:
+                                if str(order.get('orderId')) == str(order_id) or str(order.get('id')) == str(order_id):
+                                    order_info = order
+                                    break
+                        else:
+                            print(f"   ⚠️ Failed to get order status: {response.status_code}, Response: {response.text}")
+                            if attempt < max_retries - 1:
+                                time.sleep(1)
+                                continue
                             break
+                    
+                    if order_info:
+                        status = order_info.get('status', order_info.get('orderStatus', 'Unknown')).upper()
+                        filled_qty = float(order_info.get('filledQuantity', order_info.get('filled', 0)))
+                        remaining_qty = float(order_info.get('remainingQuantity', order_info.get('remaining', expected_shares - filled_qty)))
+                        avg_price = float(order_info.get('avgPrice', order_info.get('avgFillPrice', 0)))
                         
-                        print(f"   ⏳ Partial fill: {filled_qty}/{expected_shares} shares. Waiting for more...")
+                        if filled_qty > last_filled:
+                            last_filled = filled_qty
+                            no_progress_time = 0
+                            print(f"   📈 Progress: {filled_qty}/{expected_shares} shares filled at avg ${avg_price}")
+                        
+                        if status in ['FILLED', 'COMPLETE']:
+                            print(f"   ✅ Order {order_id} FULLY FILLED: {filled_qty} shares at ${avg_price}")
+                            return {
+                                'success': True,
+                                'filled_shares': filled_qty,
+                                'remaining_shares': 0,
+                                'avg_price': avg_price,
+                                'status': status,
+                                'cancelled': False
+                            }
+                        elif status in ['CANCELLED', 'CANCELED']:
+                            print(f"   ❌ Order {order_id} CANCELLED: {filled_qty} shares filled, {remaining_qty} remaining")
+                            return {
+                                'success': filled_qty > 0,
+                                'filled_shares': filled_qty,
+                                'remaining_shares': remaining_qty,
+                                'avg_price': avg_price,
+                                'status': status,
+                                'cancelled': True
+                            }
+                        elif status in ['PRESUBMITTED']:
+                            print(f"   ⏳ Order {order_id} in PreSubmitted state, waiting for status change...")
+                            time.sleep(3)
+                            continue
+                        elif filled_qty > 0 and filled_qty < expected_shares:
+                            if status in ['PARTIALLYFILLED', 'SUBMITTED', 'PENDING']:
+                                no_progress_time += 1
+                                if no_progress_time >= 5:
+                                    print(f"   ⚠️ No progress for 5s on partial fill. Considering cancellation...")
+                                    break
+                                print(f"   ⏳ Partial fill: {filled_qty}/{expected_shares} shares. Waiting for more...")
+                                time.sleep(1)
+                                continue
+                    else:
+                        print(f"   ⚠️ Order {order_id} not found in order list (attempt {attempt + 1})")
+                        if attempt < max_retries - 1:
+                            time.sleep(1)
+                            continue
+                        
+                        # Check trades endpoint
+                        print(f"   ⚠️ Checking trades for order {order_id}...")
+                        trades_response = self.ib_api.session.get(f"{self.ib_api.base_url}/iserver/account/trades", timeout=30)
+                        if trades_response.status_code == 200:
+                            trades = trades_response.json()
+                            for trade in trades:
+                                if str(trade.get('order_id')) == str(order_id):
+                                    print(f"   ✅ Found trade: {trade}")
+                                    return {
+                                        'success': True,
+                                        'filled_shares': float(trade.get('executed_qty', 0)),
+                                        'remaining_shares': 0,
+                                        'avg_price': float(trade.get('avg_price', 0)),
+                                        'status': 'FILLED',
+                                        'cancelled': False
+                                    }
+                        print(f"   ⚠️ Order {order_id} not found in order or trade list")
+                    
+                    time.sleep(1)
+                    no_progress_time += 1
+                    break
+                except Exception as e:
+                    print(f"   ⚠️ Error checking order status: {str(e)}")
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
                         continue
-                
-                self.ib_wrapper.order_events[order_id].clear()
-            else:
-                no_progress_time += 5
+                    time.sleep(1)
+                    no_progress_time += 1
+                    break
         
-        # Cancel order on timeout
-        print(f"   ⏰ Order {order_id} timeout. Attempting to cancel...")
-        
+        # Cancellation logic
+        print(f"   ⏰ Order {order_id} timeout. Checking status before cancellation...")
         try:
-            self.ib_client.reqGlobalCancel()
-            print(f"   📤 Cancellation request sent for order {order_id}")
-            
-            if self.ib_wrapper.order_events[order_id].wait(timeout=10):
-                order_status = self.ib_wrapper.order_fills.get(order_id, {})
-                filled_qty = float(order_status.get('filled', 0))
-                remaining_qty = float(order_status.get('remaining', expected_shares - filled_qty))
-                avg_price = float(order_status.get('avgFillPrice', 0))
-                
-                return {
-                    'success': filled_qty > 0,
-                    'filled_shares': filled_qty,
-                    'remaining_shares': remaining_qty,
-                    'avg_price': avg_price,
-                    'status': 'Cancelled',
-                    'cancelled': True
-                }
+            status_response = self.ib_api.get_order_status(order_id)
+            print(f"   📋 Order status before cancellation: {status_response.text}")
+            if status_response.status_code == 200 and status_response.json():
+                cancel_response = self.ib_api.cancel_order(order_id)
+                print(f"   📤 Cancellation request sent for order {order_id}: {cancel_response.status_code}, Response: {cancel_response.text}")
+                if cancel_response.status_code == 200:
+                    time.sleep(5)  # Wait for cancellation to process
+                    final_response = self.ib_api.get_order_status()
+                    if final_response.status_code == 200:
+                        orders = final_response.json().get('orders', [])
+                        for order in orders:
+                            if str(order.get('orderId')) == str(order_id) or str(order.get('id')) == str(order_id):
+                                filled_qty = float(order.get('filledQuantity', order.get('filled', 0)))
+                                remaining_qty = float(order.get('remainingQuantity', order.get('remaining', expected_shares - filled_qty)))
+                                avg_price = float(order.get('avgPrice', order.get('avgFillPrice', 0)))
+                                return {
+                                    'success': filled_qty > 0,
+                                    'filled_shares': filled_qty,
+                                    'remaining_shares': remaining_qty,
+                                    'avg_price': avg_price,
+                                    'status': 'Cancelled',
+                                    'cancelled': True
+                                }
+            else:
+                print(f"   ⚠️ Order {order_id} not found, skipping cancellation")
         except Exception as e:
             print(f"   ❌ Failed to cancel order {order_id}: {str(e)}")
         
-        # Fallback
-        order_status = self.ib_wrapper.order_fills.get(order_id, {})
-        filled_qty = float(order_status.get('filled', 0))
-        remaining_qty = float(order_status.get('remaining', expected_shares - filled_qty))
-        avg_price = float(order_status.get('avgFillPrice', 0))
-        
         return {
-            'success': filled_qty > 0,
-            'filled_shares': filled_qty,
-            'remaining_shares': remaining_qty,
-            'avg_price': avg_price,
+            'success': False,
+            'filled_shares': 0,
+            'remaining_shares': expected_shares,
+            'avg_price': 0,
             'status': 'Timeout',
             'cancelled': False
         }
     
-    def _create_stock_contract(self, ticker: str) -> Contract:
-        """Create stock contract"""
-        contract = Contract()
-        contract.symbol = ticker
-        contract.secType = "STK"
-        contract.exchange = "SMART"
-        contract.currency = "USD"
-        return contract
-    
-    def _create_market_order(self, action: str, shares: float) -> Order:
-        """Create market order"""
-        order = Order()
-        order.action = action
-        order.totalQuantity = shares
-        order.orderType = "MKT"
-        return order
-    
-    def _create_stop_order(self, action: str, shares: float, stop_price: float) -> Order:
-        """Create stop order"""
-        order = Order()
-        order.action = action
-        order.totalQuantity = shares
-        order.orderType = "STP"
-        order.auxPrice = stop_price
-        return order
-    
-    def _get_next_order_id(self) -> int:
-        """Get next available order ID"""
-        order_id = self.ib_wrapper.next_order_id
-        self.ib_wrapper.next_order_id += 1
-        return order_id
-    
     def _execute_buy_order(self, trade: Trade) -> dict:
-        """Execute buy order via IB API"""
+        """Execute buy order via Web API with partial order handling"""
         print(f"\n🔵 EXECUTING BUY ORDER:")
         print(f"   Ticker: {trade.ticker}")
         print(f"   Shares: {trade.shares}")
         print(f"   Risk Amount: ${trade.risk_amount}")
         
         try:
-            contract = self._create_stock_contract(trade.ticker)
-            order = self._create_market_order("BUY", trade.shares)
-            order_id = self._get_next_order_id()
+            result = self._execute_order(trade.ticker, "BUY", trade.shares)
             
-            self.ib_client.placeOrder(order_id, contract, order)
+            if not result['success']:
+                error_msg = f"Buy order submission failed: {result['error']}"
+                print(f"   ❌ BUY ORDER SUBMISSION FAILED: {result['error']}")
+                self._log_error("BUY_ORDER_FAILED", trade.ticker, error_msg)
+                return {
+                    'success': False,
+                    'filled_shares': 0,
+                    'avg_price': 0,
+                    'full_fill': False
+                }
+            
+            order_id = result['order_id']
             print(f"   📤 BUY ORDER SUBMITTED (Order ID: {order_id})")
             
-            fill_result = self._wait_for_order_fill(order_id, trade.shares, timeout=10)
+            # Wait for order to fill with partial handling
+            fill_result = self._wait_for_order_fill_webapi(order_id, trade.shares, timeout=5)
             
             if fill_result['success']:
                 filled_shares = float(fill_result['filled_shares'])
@@ -459,7 +667,7 @@ class StockTradingServer:
             }
     
     def _execute_sell_stop_orders(self, trade: Trade, actual_shares_bought: float):
-        """Execute sell stop orders based on actual shares bought"""
+        """Execute sell stop orders based on actual shares bought with proper scaling"""
         print(f"\n🔴 SETTING SELL STOP ORDERS for {actual_shares_bought} shares:")
         
         if actual_shares_bought == 0:
@@ -469,22 +677,48 @@ class StockTradingServer:
         total_planned_shares = trade.shares
         scale_factor = float(actual_shares_bought) / total_planned_shares
         
+        # Get contract ID for tick size validation
+        conid = self.ib_api.get_contract_id(trade.ticker)
+        if not conid:
+            print(f"   ❌ Could not find contract for {trade.ticker}")
+            self._log_error("CONTRACT_NOT_FOUND", trade.ticker, "Could not find contract ID")
+            return
+        
+        # Get contract details for tick size
+        contract_details = self.ib_api.get_contract_details(conid)
+        price_increment = 0.01  # Default tick size
+        if contract_details:
+            price_increment = float(contract_details.get('priceIncrement', 0.01))
+            print(f"   📏 Price increment (tick size): ${price_increment}")
+        
         try:
-            contract = self._create_stock_contract(trade.ticker)
-            
             for i, stop in enumerate(trade.sell_stops, 1):
                 try:
-                    scaled_shares = math.floor(stop.shares * scale_factor)
+                    # Scale the shares but keep fractional precision for Web API
+                    scaled_shares = stop.shares * scale_factor
                     
-                    if scaled_shares == 0:
-                        print(f"   ⚠️ Stop {i}: Skipping (scaled to 0 shares)")
+                    if scaled_shares < 0.001:  # Minimum fractional share
+                        print(f"   ⚠️ Stop {i}: Skipping (scaled to {scaled_shares:.3f} shares - too small)")
                         continue
                     
-                    order = self._create_stop_order("SELL", scaled_shares, stop.price)
-                    order_id = self._get_next_order_id()
+                    # Adjust stop price to nearest tick
+                    adjusted_stop_price = round(stop.price / price_increment) * price_increment
+                    if abs(adjusted_stop_price - stop.price) > 0.001:
+                        print(f"   🔧 Adjusted stop price for {trade.ticker} from ${stop.price} to ${adjusted_stop_price}")
                     
-                    self.ib_client.placeOrder(order_id, contract, order)
-                    print(f"   Stop {i}: {scaled_shares} shares at ${stop.price} - Order ID: {order_id}")
+                    result = self._execute_order(
+                        trade.ticker, 
+                        "SELL", 
+                        scaled_shares,
+                        "STP", 
+                        stop_price=adjusted_stop_price
+                    )
+                    
+                    if result['success']:
+                        print(f"   Stop {i}: {scaled_shares:.3f} shares at ${adjusted_stop_price} - Order ID: {result.get('order_id', 'N/A')}")
+                    else:
+                        print(f"   ❌ Stop {i} FAILED: {result['error']}")
+                        self._log_error("SELL_STOP_ORDER_FAILED", trade.ticker, result['error'])
                     
                     time.sleep(0.5)
                     
