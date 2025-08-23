@@ -11,14 +11,31 @@ import json
 from typing import List, Dict, Optional, Tuple
 import statistics
 import random
+import os
+import glob
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Create unique log file name
-rand_id = random.randint(1000, 9999)
-log_filename = f"stock_data_server_{rand_id}.log"
+# Find the next available log file number
+existing_log_files = glob.glob("stock_data_server_*.log")
+if existing_log_files:
+    # Extract numbers from existing files
+    numbers = []
+    for file in existing_log_files:
+        try:
+            # Extract number from filename like "stock_data_server_1234.log"
+            num = int(file.split("_")[-1].split(".")[0])
+            numbers.append(num)
+        except (ValueError, IndexError):
+            continue
+    
+    next_num = max(numbers) + 1 if numbers else 1
+else:
+    next_num = 1
+
+log_filename = f"stock_data_server_{next_num}.log"
 
 # File handler
 file_handler = logging.FileHandler(log_filename, mode='a', encoding='utf-8')
